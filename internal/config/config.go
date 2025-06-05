@@ -12,6 +12,8 @@ import (
 	"github.com/sethvargo/go-githubactions"
 )
 
+const requiredTagKey = "runs-on-stack-name"
+
 type Config struct {
 	Path                     string
 	Version                  string
@@ -64,11 +66,19 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 		}
 	}
 
+	requiredTagPresent := false
 	for _, tag := range cfg.RunnerConfig.CustomTags {
+		if tag.Key == requiredTagKey {
+			requiredTagPresent = true
+		}
 		cfg.CustomTags = append(cfg.CustomTags, Tag{
 			Key:   tag.Key,
 			Value: tag.Value,
 		})
+	}
+
+	if !requiredTagPresent {
+		action.Fatalf("Required tag '%s' is not present in the RunsOn config file.", requiredTagKey)
 	}
 
 	path := action.GetInput("path")
