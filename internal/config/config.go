@@ -52,14 +52,14 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 
 	configBytes, err := os.ReadFile(filepath.Join(os.Getenv("RUNS_ON_HOME"), "config.json"))
 	if err != nil {
-		action.Errorf("Error reading RunsOn config file: %v. You must be using RunsOn v2.8.3+", err)
+		action.Fatalf("Error reading RunsOn config file: %v. You must be using RunsOn v2.8.3+", err)
 	} else {
 		var runnerConfig RunnerConfig
 		if err := json.Unmarshal(configBytes, &runnerConfig); err != nil {
 			action.Warningf("Error parsing RunsOn config file: %v", err)
 		} else {
 			cfg.RunnerConfig = &runnerConfig
-			action.Infof("Runner config: %v", cfg.RunnerConfig)
+			action.Infof("Runner config: %#v", cfg.RunnerConfig)
 		}
 	}
 

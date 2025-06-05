@@ -8,9 +8,6 @@ help:
 	@echo '   make release               Build all static binaries + `index.js` and `post.js`'
 	@echo ''
 
-################################################################################
-# Meta-variables
-################################################################################
 UPX_BIN := $(shell command -v upx 2> /dev/null)
 COMMAND := "."
 
@@ -40,10 +37,6 @@ main-windows-amd64: _require-upx
 
 .PHONY: release
 release: main-linux-amd64 main-linux-arm64 main-windows-amd64 generate-js
-
-################################################################################
-# Doctor Commands (these do not show up in `make help`)
-################################################################################
 
 .PHONY: _require-upx
 _require-upx:
