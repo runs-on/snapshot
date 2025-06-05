@@ -1,7 +1,7 @@
 .PHONY: help
 help:
 	@echo 'Usage:'
-	@echo '   make generate-index        Generate `index.js` and `post.js` files
+	@echo '   make js                    Generate `index.js` and `post.js` files'
 	@echo '   make main-linux-amd64      Build static binary for linux/amd64'
 	@echo '   make main-linux-arm64      Build static binary for linux/arm64'
 	@echo '   make main-windows-amd64    Build static binary for windows/amd64'
@@ -11,8 +11,8 @@ help:
 UPX_BIN := $(shell command -v upx 2> /dev/null)
 COMMAND := "."
 
-.PHONY: generate-js
-generate-js:
+.PHONY: js
+js:
 	rm -f index.js post.js
 	echo 'package main; import ("os"; "text/template"); func main() { tmpl, _ := template.ParseFiles("index.template.js"); tmpl.Execute(os.Stdout, map[string]string{"Args": ""}) }' > temp.go && go run temp.go > index.js && rm temp.go
 	echo 'package main; import ("os"; "text/template"); func main() { tmpl, _ := template.ParseFiles("index.template.js"); tmpl.Execute(os.Stdout, map[string]string{"Args": "--post"}) }' > temp.go && go run temp.go > post.js && rm temp.go
@@ -36,7 +36,7 @@ main-windows-amd64: _require-upx
 	upx -q -9 "main-windows-amd64"
 
 .PHONY: release
-release: main-linux-amd64 main-linux-arm64 main-windows-amd64 generate-js
+release: main-linux-amd64 main-linux-arm64 main-windows-amd64 js
 
 .PHONY: _require-upx
 _require-upx:
