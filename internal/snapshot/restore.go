@@ -79,6 +79,8 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 		{Key: aws.String(ttlTagKey), Value: aws.String(fmt.Sprintf("%d", time.Now().Add(time.Duration(defaultVolumeLifeDurationMinutes)*time.Minute).Unix()))},
 	}...)
 
+	s.logger.Info().Msgf("RestoreSnapshot: common volume tags: %#v", commonVolumeTags)
+
 	// Use snapshot only if its size is at least the default volume size, otherwise create a new volume
 	// TODO: maybe just expand the volume size to snmapshot size + 10GB, and resize disk
 	if latestSnapshot != nil && latestSnapshot.VolumeSize != nil && *latestSnapshot.VolumeSize >= s.config.VolumeSize {
