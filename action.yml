@@ -1,0 +1,41 @@
+name: 'runs-on/snapshot'
+description: 'GitHub Action for snapshotting directories on self-hosted runners'
+runs:
+  using: 'node20'
+  main: 'index.js'
+  post: 'post.js'
+  # required, otherwise it could snapshot directories even if previous steps failed or were interrupted, which could lead to corrupted snapshots
+  post-if: "success()"
+
+inputs:
+  path:
+    description: 'Path to the directory to snapshot. Must be an absolute path.'
+    required: true
+  version:
+    description: 'Version of the snapshot to use'
+    required: false
+    default: 'v1'
+  volume_type:
+    description: 'Type of volume to use for the snapshot.'
+    required: false
+    default: 'gp3'
+  volume_iops:
+    description: 'IOPS to use for the volume.'
+    required: false
+    default: '3000'
+  volume_throughput:
+    description: 'Throughput to use for the volume.'
+    required: false
+    default: '750'
+  volume_size:
+    description: 'Size (in GiB) of the volume to use for the snapshot.'
+    required: false
+    default: '40'
+  volume_initialization_rate:
+    description: 'Initialization rate to use for the volume. Useful for very large volumes. 100 MB/s - 200 MB/s: $0.00240/GB, 201 MB/s - 300 MB/s	$0.00360/GB'
+    required: false
+    default: '0' # 0 means "disabled"
+  wait_for_completion:
+    description: 'Wait for snapshot completion before exiting. Note that the first snapshot will always be waited for.'
+    required: false
+    default: 'false'
