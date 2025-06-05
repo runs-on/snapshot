@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/runs-on/snapshot/internal/utils"
 	"github.com/sethvargo/go-githubactions"
 )
 
@@ -59,7 +60,7 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 			action.Warningf("Error parsing RunsOn config file: %v", err)
 		} else {
 			cfg.RunnerConfig = &runnerConfig
-			action.Infof("Runner config: %#v", cfg.RunnerConfig)
+			action.Infof("Runner config: %s", utils.PrettyPrint(cfg.RunnerConfig))
 		}
 	}
 

@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/runs-on/snapshot/internal/utils"
 )
 
 // RestoreSnapshot finds the latest snapshot for the current git branch,
@@ -29,7 +30,7 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 	for _, tag := range s.defaultTags() {
 		filters = append(filters, types.Filter{Name: aws.String(fmt.Sprintf("tag:%s", *tag.Key)), Values: []string{*tag.Value}})
 	}
-	s.logger.Info().Msgf("RestoreSnapshot: Searching for the latest snapshot for branch: %s and tags: %v", gitBranch, filters)
+	s.logger.Info().Msgf("RestoreSnapshot: Searching for the latest snapshot for branch: %s and tags: %s", gitBranch, utils.PrettyPrint(filters))
 	snapshotsOutput, err := s.ec2Client.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{
 		Filters:  filters,
 		OwnerIds: []string{"self"}, // Or specific account ID if needed
