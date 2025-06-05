@@ -64,6 +64,13 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 		}
 	}
 
+	for _, tag := range cfg.RunnerConfig.CustomTags {
+		cfg.CustomTags = append(cfg.CustomTags, Tag{
+			Key:   tag.Key,
+			Value: tag.Value,
+		})
+	}
+
 	path := action.GetInput("path")
 	path = strings.TrimSpace(path)
 	if path == "" {
