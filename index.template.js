@@ -29,8 +29,6 @@ function chooseBinary() {
 function main() {
     const binary = chooseBinary()
     const mainScript = `${__dirname}/${binary}`
-    console.log('Current user:', childProcess.execSync('whoami').toString().trim())
-    
     if (os.platform() === WINDOWS) {
         childProcess.execFileSync('powershell', [
             '-Command',
