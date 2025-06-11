@@ -1,4 +1,4 @@
-name: Dev / Slow Build
+name: Test
 on:
   push:
     branches:
