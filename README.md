@@ -2,7 +2,7 @@
 
 GitHub Action to snapshot and restore entire folders on self-hosted runners.
 
-To be used with [RunsOn](https://runs-on.com).
+To be used with [RunsOn](https://runs-on.com). Requires version v2.8.3+.
 
 ## Usage
 
@@ -32,7 +32,7 @@ jobs:
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | path | Path to the directory to snapshot. Must be an absolute path. | Yes | - |
-| version | Version of the snapshot to use | No | v1 |
+| version | Version of the snapshot to use. Can be bumped to force a new initial snapshot | No | v1 |
 | volume_type | Type of volume to use for the snapshot | No | gp3 |
 | volume_iops | IOPS to use for the volume | No | 3000 |
 | volume_throughput | Throughput to use for the volume | No | 750 |
