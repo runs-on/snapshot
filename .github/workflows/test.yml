@@ -1,0 +1,35 @@
+name: Test
+on:
+  push:
+    branches:
+      - master
+      - main
+      - v*
+      - feature/v*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-with-snapshot:
+    name: Build with Snapshot
+    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.2xlarge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          path: /var/lib/docker
+      - run: df -ah && sudo ls -al /var/lib/docker
+      - uses: aptos-labs/setup-buildx-action@balaji/retain-cache
+        with:
+          name: runs-on
+          keep-state: true
+      - uses: actions/checkout@v4
+        with:
+          repository: runs-on-demo/benchmark-posthog
+          submodules: recursive
+          path: repo
+      - uses: docker/build-push-action@v4
+        with:
+          context: ./repo/upstream

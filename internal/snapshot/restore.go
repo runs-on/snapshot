@@ -9,6 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/runs-on/snapshot/internal/utils"
 )
 
 // RestoreSnapshot finds the latest snapshot for the current git branch,
@@ -29,7 +30,7 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 	for _, tag := range s.defaultTags() {
 		filters = append(filters, types.Filter{Name: aws.String(fmt.Sprintf("tag:%s", *tag.Key)), Values: []string{*tag.Value}})
 	}
-	s.logger.Info().Msgf("RestoreSnapshot: Searching for the latest snapshot for branch: %s and tags: %v", gitBranch, filters)
+	s.logger.Info().Msgf("RestoreSnapshot: Searching for the latest snapshot for branch: %s and filters: %s", gitBranch, utils.PrettyPrint(filters))
 	snapshotsOutput, err := s.ec2Client.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{
 		Filters:  filters,
 		OwnerIds: []string{"self"}, // Or specific account ID if needed
@@ -79,8 +80,10 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 		{Key: aws.String(ttlTagKey), Value: aws.String(fmt.Sprintf("%d", time.Now().Add(time.Duration(defaultVolumeLifeDurationMinutes)*time.Minute).Unix()))},
 	}...)
 
+	s.logger.Info().Msgf("RestoreSnapshot: common volume tags: %s", utils.PrettyPrint(commonVolumeTags))
+
 	// Use snapshot only if its size is at least the default volume size, otherwise create a new volume
-	// TODO: maybe just expand the volume size to snmapshot size + 10GB, and resize disk
+	// TODO: maybe just expand the volume size to snapshot size + 10GB, and resize disk
 	if latestSnapshot != nil && latestSnapshot.VolumeSize != nil && *latestSnapshot.VolumeSize >= s.config.VolumeSize {
 		// 2. Create Volume from Snapshot
 		s.logger.Info().Msgf("RestoreSnapshot: Creating volume from snapshot %s", *latestSnapshot.SnapshotId)

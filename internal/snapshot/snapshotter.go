@@ -230,3 +230,10 @@ func (s *AWSSnapshotter) runCommand(ctx context.Context, name string, arg ...str
 	s.logger.Info().Msgf("Command successful. Output (first 200 chars or less):\n%s", logOutput)
 	return output, nil
 }
+
+// getVolumeInfoPath returns the path to the volume info JSON file for a given mount point
+func getVolumeInfoPath(mountPoint string) string {
+	// Replace slashes with hyphens and remove leading/trailing hyphens
+	sanitizedPath := strings.Trim(strings.ReplaceAll(mountPoint, "/", "-"), "-")
+	return filepath.Join("/runs-on", fmt.Sprintf("snapshot-%s.json", sanitizedPath))
+}

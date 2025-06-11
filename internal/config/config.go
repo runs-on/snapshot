@@ -8,8 +8,11 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/runs-on/snapshot/internal/utils"
 	"github.com/sethvargo/go-githubactions"
 )
+
+const requiredTagKey = "runs-on-stack-name"
 
 type Config struct {
 	Path                     string
@@ -52,15 +55,30 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 
 	configBytes, err := os.ReadFile(filepath.Join(os.Getenv("RUNS_ON_HOME"), "config.json"))
 	if err != nil {
-		action.Errorf("Error reading RunsOn config file: %v. You must be using RunsOn v2.8.3+", err)
+		action.Fatalf("Error reading RunsOn config file: %v. You must be using RunsOn v2.8.3+", err)
 	} else {
 		var runnerConfig RunnerConfig
 		if err := json.Unmarshal(configBytes, &runnerConfig); err != nil {
 			action.Warningf("Error parsing RunsOn config file: %v", err)
 		} else {
 			cfg.RunnerConfig = &runnerConfig
-			action.Infof("Runner config: %v", cfg.RunnerConfig)
+			action.Infof("Runner config: %s", utils.PrettyPrint(cfg.RunnerConfig))
 		}
+	}
+
+	requiredTagPresent := false
+	for _, tag := range cfg.RunnerConfig.CustomTags {
+		if tag.Key == requiredTagKey {
+			requiredTagPresent = true
+		}
+		cfg.CustomTags = append(cfg.CustomTags, Tag{
+			Key:   tag.Key,
+			Value: tag.Value,
+		})
+	}
+
+	if !requiredTagPresent {
+		action.Fatalf("Required tag '%s' is not present in the RunsOn config file.", requiredTagKey)
 	}
 
 	path := action.GetInput("path")
