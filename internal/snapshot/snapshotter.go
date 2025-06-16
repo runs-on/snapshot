@@ -96,7 +96,7 @@ type VolumeInfo struct {
 // NewAWSSnapshotter creates a new AWSSnapshotter instance.
 // It initializes the AWS SDK configuration and fetches EC2 instance metadata.
 func NewAWSSnapshotter(ctx context.Context, logger *zerolog.Logger, cfg *runsOnConfig.Config) (*AWSSnapshotter, error) {
-	awsConfig, err := config.LoadDefaultConfig(ctx)
+	awsConfig, err := config.LoadDefaultConfig(ctx, config.WithRegion(os.Getenv("RUNS_ON_AWS_REGION")))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS SDK config: %w", err)
 	}
