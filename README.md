@@ -17,8 +17,7 @@ jobs:
       - uses: runs-on/snapshot@v1
         with:
           path: /var/lib/docker
-      # setup-buildx-action from a PR that will be merged soon?
-      - uses: aptos-labs/setup-buildx-action@balaji/retain-cache
+      - uses: docker/setup-buildx-action@v3
         with:
           name: runs-on
           keep-state: true
