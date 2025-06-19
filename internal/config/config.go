@@ -28,7 +28,6 @@ type Config struct {
 	GithubRepository         string
 	InstanceID               string
 	Az                       string
-	DefaultBranch            string
 	CustomTags               []Tag
 	SnapshotName             string
 	RunnerConfig             *RunnerConfig

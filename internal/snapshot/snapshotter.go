@@ -209,7 +209,7 @@ func (s *AWSSnapshotter) getSnapshotTagValue() string {
 }
 
 func (s *AWSSnapshotter) getSnapshotTagValueDefaultBranch() string {
-	return fmt.Sprintf("%s", s.config.DefaultBranch)
+	return fmt.Sprintf("%s", s.config.RunnerConfig.DefaultBranch)
 }
 
 // runCommand executes a shell command and returns its combined output or an error.

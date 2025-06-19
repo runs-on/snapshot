@@ -49,17 +49,20 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 			}
 		}
 		s.logger.Info().Msgf("RestoreSnapshot: Found latest snapshot %s for branch %s", *latestSnapshot.SnapshotId, gitBranch)
-	} else if s.config.DefaultBranch != "" {
+	} else if s.config.RunnerConfig.DefaultBranch != "" {
 		// Try finding snapshot from default branch
-		filters[0] = types.Filter{Name: aws.String("tag:" + snapshotTagKeyBranch), Values: []string{s.getSnapshotTagValueDefaultBranch()}}
-		s.logger.Info().Msgf("RestoreSnapshot: No snapshot found for branch %s, trying default branch %s with tags: %v", gitBranch, s.config.DefaultBranch, filters)
+		if err := replaceFilterValues(filters, "tag:"+snapshotTagKeyBranch, []string{s.getSnapshotTagValueDefaultBranch()}); err != nil {
+			return nil, fmt.Errorf("failed to find default branch filter: %w", err)
+		}
+
+		s.logger.Info().Msgf("RestoreSnapshot: No snapshot found for branch %s, trying default branch %s with filters: %s", gitBranch, s.config.RunnerConfig.DefaultBranch, utils.PrettyPrint(filters))
 
 		defaultBranchSnapshotsOutput, err := s.ec2Client.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{
 			Filters:  filters,
 			OwnerIds: []string{"self"},
 		})
 		if err != nil {
-			return nil, fmt.Errorf("failed to describe snapshots for default branch %s: %w", s.config.DefaultBranch, err)
+			return nil, fmt.Errorf("failed to describe snapshots for default branch %s: %w", s.config.RunnerConfig.DefaultBranch, err)
 		}
 
 		if len(defaultBranchSnapshotsOutput.Snapshots) > 0 {
@@ -69,9 +72,9 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 					latestSnapshot = &snap
 				}
 			}
-			s.logger.Info().Msgf("RestoreSnapshot: Found latest snapshot %s from default branch %s", *latestSnapshot.SnapshotId, s.config.DefaultBranch)
+			s.logger.Info().Msgf("RestoreSnapshot: Found latest snapshot %s from default branch %s", *latestSnapshot.SnapshotId, s.config.RunnerConfig.DefaultBranch)
 		} else {
-			s.logger.Info().Msgf("RestoreSnapshot: No existing snapshot found for branch %s or default branch %s. A new volume will be created.", gitBranch, s.config.DefaultBranch)
+			s.logger.Info().Msgf("RestoreSnapshot: No existing snapshot found for branch %s or default branch %s. A new volume will be created.", gitBranch, s.config.RunnerConfig.DefaultBranch)
 		}
 	}
 
@@ -271,4 +274,15 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 	}
 
 	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: actualDeviceName, NewVolume: volumeIsNewAndUnformatted}, nil
+}
+
+func replaceFilterValues(filters []types.Filter, name string, values []string) error {
+	for i, filter := range filters {
+		if *filter.Name == name {
+			filters[i].Values = values
+			return nil
+		}
+	}
+
+	return fmt.Errorf("filter %s not found in filters: %v", name, utils.PrettyPrint(filters))
 }
