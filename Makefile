@@ -1,10 +1,13 @@
+PREVIOUS_TAG ?= $(shell git tag -l | tail -n 1)
+TAG=v1.0.1
+
 .PHONY: help
 help:
 	@echo 'Usage:'
 	@echo '   make js                    Generate `index.js` and `post.js` files'
 	@echo '   make main-linux-amd64      Build static binary for linux/amd64'
 	@echo '   make main-linux-arm64      Build static binary for linux/arm64'
-	@echo '   make release               Build all static binaries + `index.js` and `post.js`'
+	@echo '   make build	             Build all static binaries + `index.js` and `post.js`'
 	@echo ''
 
 UPX_BIN := $(shell command -v upx 2> /dev/null)
@@ -28,11 +31,24 @@ main-linux-arm64: _require-upx
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -installsuffix static -o "main-linux-arm64" $(COMMAND)
 	upx -q -9 "main-linux-arm64"
 
-.PHONY: release
-release: main-linux-amd64 main-linux-arm64 js
+.PHONY: build
+build: main-linux-amd64 main-linux-arm64 js
 
 .PHONY: _require-upx
 _require-upx:
 ifndef UPX_BIN
 	$(error 'upx is not installed, it can be installed via "apt-get install upx", "apk add upx" or "brew install upx".')
 endif
+
+.PHONY: bump tag release
+
+bump:
+	gsed -i "s/$(PREVIOUS_TAG)/$(TAG)/g" README.md
+	gsed -i "s/$(PREVIOUS_TAG)/$(TAG)/g" action.yml
+
+tag: bump
+	git tag -a $(TAG) -m "Release $(TAG)"
+	git push origin $(TAG)
+
+release: tag
+	gh release create $(TAG) --generate-notes
