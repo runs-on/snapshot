@@ -12,11 +12,11 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/rs/zerolog"
 	runsOnConfig "github.com/runs-on/snapshot/internal/config"
+	"github.com/runs-on/snapshot/internal/utils"
 )
 
 const (
@@ -96,7 +96,7 @@ type VolumeInfo struct {
 // NewAWSSnapshotter creates a new AWSSnapshotter instance.
 // It initializes the AWS SDK configuration and fetches EC2 instance metadata.
 func NewAWSSnapshotter(ctx context.Context, logger *zerolog.Logger, cfg *runsOnConfig.Config) (*AWSSnapshotter, error) {
-	awsConfig, err := config.LoadDefaultConfig(ctx, config.WithRegion(os.Getenv("RUNS_ON_AWS_REGION")))
+	awsConfig, err := utils.GetAWSClientFromEC2IMDS(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS SDK config: %w", err)
 	}
@@ -141,7 +141,7 @@ func NewAWSSnapshotter(ctx context.Context, logger *zerolog.Logger, cfg *runsOnC
 	return &AWSSnapshotter{
 		logger:    logger,
 		config:    cfg,
-		ec2Client: ec2.NewFromConfig(awsConfig),
+		ec2Client: ec2.NewFromConfig(*awsConfig),
 	}, nil
 }
 
