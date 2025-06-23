@@ -21,6 +21,7 @@ jobs:
       - uses: ./
         with:
           path: /var/lib/docker
+          volume_size: 60
       - run: df -ah && sudo ls -al /var/lib/docker
       - uses: docker/setup-buildx-action@v3
         with:
