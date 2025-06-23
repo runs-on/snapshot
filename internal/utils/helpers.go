@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -24,19 +25,11 @@ func PrettyPrint(v interface{}) string {
 //
 // This ensures that we always assume RunsOn instance profile IAM role, regardless of what happens in other GHA actions/steps.
 func GetAWSClientFromEC2IMDS(context context.Context) (*aws.Config, error) {
-	metaClient := imds.New(imds.Options{})
-
-	// We need to explicitly fetch the region from IMDS, since `config.WithEC2IMDSRegion()` relies on local/ENV config.
-	region, err := metaClient.GetRegion(context, &imds.GetRegionInput{})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get AWS region from IMDS: %w", err)
-	}
-
 	provider := ec2rolecreds.New(func(o *ec2rolecreds.Options) {
-		o.Client = metaClient
+		o.Client = imds.New(imds.Options{})
 	})
 
-	cfg, err := config.LoadDefaultConfig(context, config.WithRegion(region.Region), config.WithCredentialsProvider(aws.NewCredentialsCache(provider)))
+	cfg, err := config.LoadDefaultConfig(context, config.WithRegion(os.Getenv("RUNS_ON_AWS_REGION")), config.WithCredentialsProvider(aws.NewCredentialsCache(provider)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
