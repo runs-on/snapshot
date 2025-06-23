@@ -7,6 +7,7 @@ on:
       - v*
       - feature/v*
   workflow_dispatch:
+  pull_request:
 
 permissions:
   contents: read
