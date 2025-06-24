@@ -28,7 +28,7 @@ func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) 
 	// 2. Operations on jobVolumeID
 	if strings.HasPrefix(mountPoint, "/var/lib/docker") {
 		s.logger.Info().Msgf("CreateSnapshot: Cleaning up useless files...")
-		if _, err := s.runCommand(ctx, "sudo", "docker", "builder", "prune", "--keep-storage", "20g", "-f"); err != nil {
+		if _, err := s.runCommand(ctx, "sudo", "docker", "builder", "prune", "--max-storage", "12g", "-f"); err != nil {
 			s.logger.Warn().Msgf("Warning: failed to prune docker builder: %v", err)
 		}
 
