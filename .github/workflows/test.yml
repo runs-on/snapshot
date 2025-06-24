@@ -27,6 +27,7 @@ jobs:
         with:
           name: runs-on
           keep-state: true
+          cleanup: false
       - uses: actions/checkout@v4
         with:
           repository: runs-on-demo/benchmark-posthog
