@@ -43,7 +43,7 @@ func (s *AWSSnapshotter) executeWithBeforeAfter(ctx context.Context, description
 
 // executeWithDockerDiskUsage is a convenience wrapper for docker buildx disk usage reporting
 func (s *AWSSnapshotter) executeWithDockerDiskUsage(ctx context.Context, description string, mainFunc func() error) error {
-	return s.executeWithBeforeAfter(ctx, description, []string{"sudo", "docker", "buildx", "du"}, "docker buildx disk usage", mainFunc)
+	return s.executeWithBeforeAfter(ctx, description, []string{"sudo", "docker", "buildx", "--builder", "runs-on", "du"}, "docker buildx disk usage", mainFunc)
 }
 
 func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) (*CreateSnapshotOutput, error) {
@@ -59,7 +59,7 @@ func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) 
 	// 2. Operations on jobVolumeID
 	if strings.HasPrefix(mountPoint, "/var/lib/docker") {
 		err := s.executeWithDockerDiskUsage(ctx, "CreateSnapshot", func() error {
-			output, err := s.runCommand(ctx, "sudo", "docker", "buildx", "prune", "--keep-storage", "12g", "-f")
+			output, err := s.runCommand(ctx, "sudo", "docker", "buildx", "--builder", "runs-on", "prune", "--keep-storage", "12g", "-f")
 			if err != nil {
 				s.logger.Warn().Msgf("Warning: failed to prune docker builder: %v. Output: %s", err, string(output))
 				return err
