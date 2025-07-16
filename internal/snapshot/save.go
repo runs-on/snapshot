@@ -25,11 +25,12 @@ func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) 
 		return nil, fmt.Errorf("failed to load volume info: %w", err)
 	}
 
-	// 2. Operations on jobVolumeID
 	if strings.HasPrefix(mountPoint, "/var/lib/docker") {
-		s.logger.Info().Msgf("CreateSnapshot: Cleaning up useless files...")
-		if _, err := s.runCommand(ctx, "sudo", "docker", "builder", "prune", "-f"); err != nil {
-			s.logger.Warn().Msgf("Warning: failed to prune docker builder: %v", err)
+		// Display docker system disk usage before stopping
+		if output, err := s.runCommand(ctx, "sudo", "docker", "system", "df"); err != nil {
+			s.logger.Warn().Msgf("Warning: failed to get docker system df: %v", err)
+		} else {
+			s.logger.Info().Msgf("Docker system disk usage:\n%s", string(output))
 		}
 
 		s.logger.Info().Msgf("CreateSnapshot: Stopping docker service...")
@@ -38,6 +39,7 @@ func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) 
 		}
 	}
 
+	// 2. Operations on jobVolumeID
 	s.logger.Info().Msgf("CreateSnapshot: Unmounting %s (from device %s, volume %s)...", mountPoint, volumeInfo.DeviceName, volumeInfo.VolumeID)
 	if _, err := s.runCommand(ctx, "sudo", "umount", mountPoint); err != nil {
 		dfOutput, checkErr := s.runCommand(ctx, "df", mountPoint)
