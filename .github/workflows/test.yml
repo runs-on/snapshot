@@ -27,7 +27,12 @@ jobs:
         with:
           name: runs-on
           keep-state: true
-          cleanup: false
+          buildkitd-config-inline: |
+            [[worker.oci.gcpolicy]]
+              all = true
+              reservedSpace = "30%"
+              maxUsedSpace = "80%"
+              minFreeSpace = "50%"
       - uses: actions/checkout@v4
         with:
           repository: runs-on-demo/benchmark-posthog

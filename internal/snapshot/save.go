@@ -15,37 +15,6 @@ const (
 	defaultVolumeLifeDurationMinutes int32 = 20
 )
 
-// executeWithBeforeAfter wraps a function with configurable before and after command execution
-func (s *AWSSnapshotter) executeWithBeforeAfter(ctx context.Context, description string, beforeAfterCmd []string, beforeAfterLabel string, mainFunc func() error) error {
-	// Execute before command
-	s.logger.Info().Msgf("%s: Checking %s before...", description, beforeAfterLabel)
-	beforeOutput, err := s.runCommand(ctx, beforeAfterCmd[0], beforeAfterCmd[1:]...)
-	if err != nil {
-		s.logger.Warn().Msgf("Warning: failed to check %s before %s: %v. Output: %s", beforeAfterLabel, description, err, string(beforeOutput))
-	} else {
-		s.logger.Info().Msgf("%s: %s before:\n%s", description, beforeAfterLabel, string(beforeOutput))
-	}
-
-	// Execute main function
-	mainErr := mainFunc()
-
-	// Execute after command
-	s.logger.Info().Msgf("%s: Checking %s after...", description, beforeAfterLabel)
-	afterOutput, err := s.runCommand(ctx, beforeAfterCmd[0], beforeAfterCmd[1:]...)
-	if err != nil {
-		s.logger.Warn().Msgf("Warning: failed to check %s after %s: %v. Output: %s", beforeAfterLabel, description, err, string(afterOutput))
-	} else {
-		s.logger.Info().Msgf("%s: %s after:\n%s", description, beforeAfterLabel, string(afterOutput))
-	}
-
-	return mainErr
-}
-
-// executeWithDockerDiskUsage is a convenience wrapper for docker buildx disk usage reporting
-func (s *AWSSnapshotter) executeWithDockerDiskUsage(ctx context.Context, description string, mainFunc func() error) error {
-	return s.executeWithBeforeAfter(ctx, description, []string{"sudo", "docker", "buildx", "--builder", "runs-on0", "du"}, "docker buildx disk usage", mainFunc)
-}
-
 func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) (*CreateSnapshotOutput, error) {
 	gitBranch := s.config.GithubRef
 	s.logger.Info().Msgf("CreateSnapshot: Using git ref: %s, Instance ID: %s, MountPoint: %s", gitBranch, s.config.InstanceID, mountPoint)
@@ -56,20 +25,12 @@ func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) 
 		return nil, fmt.Errorf("failed to load volume info: %w", err)
 	}
 
-	// 2. Operations on jobVolumeID
 	if strings.HasPrefix(mountPoint, "/var/lib/docker") {
-		err := s.executeWithDockerDiskUsage(ctx, "CreateSnapshot", func() error {
-			output, err := s.runCommand(ctx, "sudo", "docker", "buildx", "--builder", "runs-on0", "prune", "--keep-storage", "12g", "-f")
-			if err != nil {
-				s.logger.Warn().Msgf("Warning: failed to prune docker builder: %v. Output: %s", err, string(output))
-				return err
-			} else {
-				s.logger.Info().Msgf("CreateSnapshot: Pruned docker builder. Output: %s", string(output))
-				return nil
-			}
-		})
-		if err != nil {
-			s.logger.Warn().Msgf("Warning: docker prune operation failed: %v", err)
+		// Display docker system disk usage before stopping
+		if output, err := s.runCommand(ctx, "sudo", "docker", "system", "df"); err != nil {
+			s.logger.Warn().Msgf("Warning: failed to get docker system df: %v", err)
+		} else {
+			s.logger.Info().Msgf("Docker system disk usage:\n%s", string(output))
 		}
 
 		s.logger.Info().Msgf("CreateSnapshot: Stopping docker service...")
@@ -78,6 +39,7 @@ func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) 
 		}
 	}
 
+	// 2. Operations on jobVolumeID
 	s.logger.Info().Msgf("CreateSnapshot: Unmounting %s (from device %s, volume %s)...", mountPoint, volumeInfo.DeviceName, volumeInfo.VolumeID)
 	if _, err := s.runCommand(ctx, "sudo", "umount", mountPoint); err != nil {
 		dfOutput, checkErr := s.runCommand(ctx, "df", mountPoint)
