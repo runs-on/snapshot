@@ -30,9 +30,10 @@ function main() {
     const binary = chooseBinary()
     const mainScript = `${__dirname}/${binary}`
     if (os.platform() === WINDOWS) {
+        const args = ARGS.length > 0 ? `-ArgumentList "${ARGS.join(' ')}"` : ''
         childProcess.execFileSync('powershell', [
             '-Command',
-            `Start-Process -FilePath "${mainScript}" -ArgumentList "${ARGS.join(' ')}" -Verb RunAs -WindowStyle Hidden -Wait`
+            `Start-Process -FilePath "${mainScript}" ${args} -Verb RunAs -WindowStyle Hidden -Wait`
         ], { stdio: 'inherit' })
     } else {
         childProcess.execFileSync('sudo', ['-n', '-E', mainScript, ...ARGS], { stdio: 'inherit' })
