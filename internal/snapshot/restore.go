@@ -95,10 +95,13 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 			AvailabilityZone: aws.String(s.config.Az),
 			VolumeType:       s.config.VolumeType,
 			Iops:             aws.Int32(s.config.VolumeIops),
-			Throughput:       aws.Int32(s.config.VolumeThroughput),
 			TagSpecifications: []types.TagSpecification{
 				{ResourceType: types.ResourceTypeVolume, Tags: commonVolumeTags},
 			},
+		}
+		// Throughput is only supported for gp3 volumes
+		if s.config.VolumeType == types.VolumeTypeGp3 {
+			createVolumeInput.Throughput = aws.Int32(s.config.VolumeThroughput)
 		}
 		if s.config.VolumeInitializationRate > 0 {
 			createVolumeInput.VolumeInitializationRate = aws.Int32(s.config.VolumeInitializationRate)
@@ -113,16 +116,20 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 	} else {
 		// 3. No snapshot found, create a new volume
 		s.logger.Info().Msgf("RestoreSnapshot: Creating a new blank volume")
-		createVolumeOutput, err := s.ec2Client.CreateVolume(ctx, &ec2.CreateVolumeInput{
+		createVolumeInput := &ec2.CreateVolumeInput{
 			AvailabilityZone: aws.String(s.config.Az),
 			VolumeType:       s.config.VolumeType,
 			Size:             aws.Int32(s.config.VolumeSize),
 			Iops:             aws.Int32(s.config.VolumeIops),
-			Throughput:       aws.Int32(s.config.VolumeThroughput),
 			TagSpecifications: []types.TagSpecification{
 				{ResourceType: types.ResourceTypeVolume, Tags: commonVolumeTags},
 			},
-		})
+		}
+		// Throughput is only supported for gp3 volumes
+		if s.config.VolumeType == types.VolumeTypeGp3 {
+			createVolumeInput.Throughput = aws.Int32(s.config.VolumeThroughput)
+		}
+		createVolumeOutput, err := s.ec2Client.CreateVolume(ctx, createVolumeInput)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create new volume: %w", err)
 		}
