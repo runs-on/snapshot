@@ -40,7 +40,7 @@ ifndef UPX_BIN
 	$(error 'upx is not installed, it can be installed via "apt-get install upx", "apk add upx" or "brew install upx".')
 endif
 
-.PHONY: bump tag release
+.PHONY: bump tag release upgrade
 
 bump:
 	gsed -i "s/$(PREVIOUS_TAG)/$(TAG)/g" README.md
@@ -52,3 +52,6 @@ tag: bump
 
 release: tag
 	gh release create $(TAG) --generate-notes
+
+upgrade:
+	mise exec -- go get -u -t ./...
