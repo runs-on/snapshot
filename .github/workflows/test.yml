@@ -49,6 +49,5 @@ jobs:
           volume_size: 10
           save: false
       - run: |
-          sudo mkdir -p /path/to/volume
-          sudo dd if=/dev/zero of=/path/to/volume/test-file-1gb bs=1M count=1024
+          dd if=/dev/zero of=/path/to/volume/test-file-1gb bs=1M count=1024
           ls -lh /path/to/volume/

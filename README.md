@@ -38,6 +38,7 @@ jobs:
 | volume_size | Size (in GiB) of the volume to use for the snapshot | No | 40 |
 | volume_initialization_rate | Initialization rate to use for the volume. Useful for very large volumes. 100 MB/s - 200 MB/s: $0.00240/GB, 201 MB/s - 300 MB/s $0.00360/GB | No | 0 |
 | wait_for_completion | Wait for snapshot completion before exiting. Note that the first snapshot will always be waited for | No | false |
+| save | Save the volume in the post step. When false, the volume is not saved, only restored | No | true |
 
 ## Snapshot selection
 
