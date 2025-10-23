@@ -35,3 +35,20 @@ jobs:
       - uses: docker/build-push-action@v4
         with:
           context: ./repo/upstream
+
+          build-with-snapshot:
+
+  restore-only:
+    name: "save: false"
+    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.2xlarge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          path: /path/to/volume
+          volume_size: 10
+          save: false
+      - run: |
+          sudo mkdir -p /path/to/volume
+          sudo dd if=/dev/zero of=/path/to/volume/test-file-1gb bs=1M count=1024
+          ls -lh /path/to/volume/
