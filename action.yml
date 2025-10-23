@@ -39,3 +39,7 @@ inputs:
     description: 'Wait for snapshot completion before exiting. Note that the first snapshot will always be waited for.'
     required: false
     default: 'false'
+  save:
+    description: 'Save the volume in the post step. When false, the volume is not saved.'
+    required: false
+    default: 'true'
