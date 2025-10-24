@@ -36,8 +36,6 @@ jobs:
         with:
           context: ./repo/upstream
 
-          build-with-snapshot:
-
   restore-only:
     name: "save: false"
     runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.2xlarge
