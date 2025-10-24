@@ -39,6 +39,12 @@ func handlePostExecution(action *githubactions.Action, ctx context.Context, logg
 	action.Infof("Running post-execution phase...")
 	cfg := config.NewConfigFromInputs(action)
 
+	if !cfg.Save {
+		action.Infof("Skipping snapshot creation as 'save' is set to false.")
+		action.Infof("Post-execution phase finished.")
+		return
+	}
+
 	if cfg.Path != "" {
 		action.Infof("Snapshotting volume for %s...", cfg.Path)
 		snapshotter, err := snapshot.NewAWSSnapshotter(ctx, logger, cfg)

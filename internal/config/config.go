@@ -18,6 +18,7 @@ type Config struct {
 	Path                     string
 	Version                  string
 	WaitForCompletion        bool
+	Save                     bool
 	VolumeType               types.VolumeType
 	VolumeIops               int32
 	VolumeThroughput         int32
@@ -96,6 +97,7 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 	}
 
 	cfg.WaitForCompletion = action.GetInput("wait_for_completion") != "false"
+	cfg.Save = action.GetInput("save") != "false"
 
 	volumeType := action.GetInput("volume_type")
 	if volumeType == "" {
