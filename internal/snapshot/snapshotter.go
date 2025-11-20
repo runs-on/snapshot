@@ -235,5 +235,13 @@ func (s *AWSSnapshotter) runCommand(ctx context.Context, name string, arg ...str
 func getVolumeInfoPath(mountPoint string) string {
 	// Replace slashes with hyphens and remove leading/trailing hyphens
 	sanitizedPath := strings.Trim(strings.ReplaceAll(mountPoint, "/", "-"), "-")
-	return filepath.Join("/runs-on", fmt.Sprintf("snapshot-%s.json", sanitizedPath))
+	sanitizedPath = strings.Trim(strings.ReplaceAll(sanitizedPath, "\\", "-"), "-")
+	sanitizedPath = strings.Trim(strings.ReplaceAll(sanitizedPath, ":", "-"), "-")
+	
+	// Use platform-appropriate base path
+	basePath := "/runs-on"
+	if runtime.GOOS == "windows" {
+		basePath = "C:\\runs-on"
+	}
+	return filepath.Join(basePath, fmt.Sprintf("snapshot-%s.json", sanitizedPath))
 }

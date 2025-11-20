@@ -197,6 +197,12 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 	}
 	s.logger.Info().Msgf("RestoreSnapshot: Volume %s attached as %s.", *newVolume.VolumeId, actualDeviceName)
 
+	// Windows and Linux handle mounting differently
+	if s.platform() == "windows" {
+		return s.restoreSnapshotWindows(ctx, newVolume, actualDeviceName, mountPoint, volumeIsNewAndUnformatted)
+	}
+
+	// Linux mounting logic
 	if strings.HasPrefix(mountPoint, "/var/lib/docker") {
 		// 6. Mounting & Docker
 		s.logger.Info().Msgf("RestoreSnapshot: Stopping docker service...")
@@ -281,6 +287,131 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 	}
 
 	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: actualDeviceName, NewVolume: volumeIsNewAndUnformatted}, nil
+}
+
+// restoreSnapshotWindows handles Windows-specific volume mounting
+func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *types.Volume, deviceName string, mountPoint string, volumeIsNewAndUnformatted bool) (*RestoreSnapshotOutput, error) {
+	// On Windows, deviceName is like /dev/xvdf or /dev/nvme1n1, but we need to find the disk number
+	// Convert device name to Windows disk number using PowerShell
+	s.logger.Info().Msgf("RestoreSnapshot: Finding Windows disk for device %s...", deviceName)
+
+	// Extract disk identifier from device name (e.g., xvdf -> f, nvme1n1 -> 1)
+	// For Windows, we'll use PowerShell to find the disk by matching the device path
+	// The device path in EC2 Windows instances maps to disk numbers
+
+	// Use PowerShell to get disk information
+	// First, wait a bit for the disk to appear in Windows
+	time.Sleep(2 * time.Second)
+
+	// Get all disks and find the one that matches our volume
+	// We'll use Get-Disk and match by size or by checking which disk is new
+	psScript := `
+		$disks = Get-Disk | Where-Object { $_.OperationalStatus -eq 'Offline' -or $_.PartitionStyle -eq 'Raw' }
+		if ($disks) {
+			$disk = $disks | Select-Object -First 1
+			Write-Output $disk.Number
+		} else {
+			# Try to find by checking recently attached disks
+			$allDisks = Get-Disk | Sort-Object Number
+			$disk = $allDisks | Where-Object { $_.Number -ne 0 } | Select-Object -First 1
+			if ($disk) {
+				Write-Output $disk.Number
+			} else {
+				Write-Error "No suitable disk found"
+			}
+		}
+	`
+
+	diskNumOutput, err := s.runCommand(ctx, "powershell", "-Command", psScript)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find Windows disk: %w", err)
+	}
+	diskNumber := strings.TrimSpace(string(diskNumOutput))
+	s.logger.Info().Msgf("RestoreSnapshot: Found Windows disk number: %s", diskNumber)
+
+	// Extract drive letter from mountPoint (e.g., "C:\test-volume" -> "C", or "E:" -> "E")
+	driveLetter := ""
+	if len(mountPoint) >= 2 && mountPoint[1] == ':' {
+		driveLetter = strings.ToUpper(string(mountPoint[0])) + ":"
+	} else {
+		// If mountPoint is a path, extract the drive letter or assign a new one
+		// For Windows, we'll assign the next available drive letter starting from E:
+		psScript = `
+			$drives = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -match '^[A-Z]$' } | Select-Object -ExpandProperty Name
+			$available = 'E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z' | Where-Object { $drives -notcontains $_ }
+			if ($available) {
+				Write-Output ($available | Select-Object -First 1)
+			} else {
+				Write-Error "No available drive letter"
+			}
+		`
+		driveOutput, err := s.runCommand(ctx, "powershell", "-Command", psScript)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find available drive letter: %w", err)
+		}
+		driveLetter = strings.TrimSpace(string(driveOutput)) + ":"
+		s.logger.Info().Msgf("RestoreSnapshot: Assigned drive letter: %s", driveLetter)
+	}
+
+	// Save volume info before formatting/mounting
+	volumeInfo := &VolumeInfo{
+		VolumeID:   *newVolume.VolumeId,
+		DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber),
+		MountPoint: driveLetter + "\\",
+		NewVolume:  volumeIsNewAndUnformatted,
+	}
+	if err := s.saveVolumeInfo(volumeInfo); err != nil {
+		s.logger.Warn().Msgf("RestoreSnapshot: Failed to save volume info: %v", err)
+	}
+
+	if volumeIsNewAndUnformatted {
+		s.logger.Info().Msgf("RestoreSnapshot: Initializing and formatting disk %s with NTFS...", diskNumber)
+		// Initialize disk, create partition, format with NTFS, and assign drive letter
+		psScript = fmt.Sprintf(`
+			Initialize-Disk -Number %s -PartitionStyle GPT -Confirm:$false
+			$partition = New-Partition -DiskNumber %s -UseMaximumSize -AssignDriveLetter
+			Format-Volume -Partition $partition -FileSystem NTFS -Confirm:$false -Force
+			$partition | Set-Partition -NewDriveLetter '%c'
+			Write-Output "Disk formatted and drive letter assigned"
+		`, diskNumber, diskNumber, driveLetter[0])
+
+		if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+			return nil, fmt.Errorf("failed to format disk %s: %w", diskNumber, err)
+		}
+		s.logger.Info().Msgf("RestoreSnapshot: Disk %s formatted with NTFS and assigned drive letter %s.", diskNumber, driveLetter)
+	} else {
+		// Volume from snapshot - just assign drive letter to existing partition
+		s.logger.Info().Msgf("RestoreSnapshot: Assigning drive letter %s to disk %s...", driveLetter, diskNumber)
+		psScript = fmt.Sprintf(`
+			$disk = Get-Disk -Number %s
+			if ($disk.PartitionStyle -eq 'Raw') {
+				Initialize-Disk -Number %s -PartitionStyle GPT -Confirm:$false
+				$partition = New-Partition -DiskNumber %s -UseMaximumSize -AssignDriveLetter
+				Format-Volume -Partition $partition -FileSystem NTFS -Confirm:$false -Force
+			}
+			$partition = Get-Partition -DiskNumber %s | Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+			if ($partition) {
+				$partition | Set-Partition -NewDriveLetter '%c'
+				Write-Output "Drive letter assigned"
+			} else {
+				Write-Error "No partition found on disk"
+			}
+		`, diskNumber, diskNumber, diskNumber, diskNumber, driveLetter[0])
+
+		if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+			return nil, fmt.Errorf("failed to assign drive letter to disk %s: %w", diskNumber, err)
+		}
+		s.logger.Info().Msgf("RestoreSnapshot: Drive letter %s assigned to disk %s.", driveLetter, diskNumber)
+	}
+
+	// Update mountPoint to use the drive letter
+	if !strings.HasSuffix(mountPoint, "\\") && !strings.HasSuffix(mountPoint, "/") {
+		mountPoint = driveLetter + "\\"
+	} else {
+		mountPoint = driveLetter + "\\"
+	}
+
+	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber), NewVolume: volumeIsNewAndUnformatted}, nil
 }
 
 func replaceFilterValues(filters []types.Filter, name string, values []string) error {

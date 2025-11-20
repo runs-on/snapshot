@@ -39,14 +39,46 @@ func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) 
 	}
 
 	s.logger.Info().Msgf("CreateSnapshot: Unmounting %s (from device %s, volume %s)...", mountPoint, volumeInfo.DeviceName, volumeInfo.VolumeID)
-	if _, err := s.runCommand(ctx, "sudo", "umount", mountPoint); err != nil {
-		dfOutput, checkErr := s.runCommand(ctx, "df", mountPoint)
-		if checkErr == nil && strings.Contains(string(dfOutput), mountPoint) { // If still mounted, then error
-			return nil, fmt.Errorf("failed to unmount %s: %w. Output: %s", mountPoint, err, string(dfOutput))
+	
+	// Windows and Linux handle unmounting differently
+	if s.platform() == "windows" {
+		// On Windows, remove the drive letter assignment
+		driveLetter := ""
+		if len(mountPoint) >= 2 && mountPoint[1] == ':' {
+			driveLetter = strings.ToUpper(string(mountPoint[0]))
+		} else if strings.HasPrefix(mountPoint, "C:\\") || strings.HasPrefix(mountPoint, "D:\\") {
+			// Extract drive letter from path
+			driveLetter = strings.ToUpper(string(mountPoint[0]))
 		}
-		s.logger.Warn().Msgf("CreateSnapshot: Unmount of %s failed but it seems not mounted anymore: %v", mountPoint, err)
+		
+		if driveLetter != "" {
+			s.logger.Info().Msgf("CreateSnapshot: Removing drive letter %s: assignment...", driveLetter)
+			psScript := fmt.Sprintf(`
+				$partition = Get-Partition | Where-Object { $_.DriveLetter -eq '%s' }
+				if ($partition) {
+					$partition | Remove-PartitionAccessPath -AccessPath '%s:' -Confirm:$false
+					Write-Output "Drive letter removed"
+				} else {
+					Write-Output "Partition not found or already removed"
+				}
+			`, driveLetter, driveLetter)
+			if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+				s.logger.Warn().Msgf("CreateSnapshot: Failed to remove drive letter %s: (may already be removed): %v", driveLetter, err)
+			} else {
+				s.logger.Info().Msgf("CreateSnapshot: Successfully removed drive letter %s:.", driveLetter)
+			}
+		}
 	} else {
-		s.logger.Info().Msgf("CreateSnapshot: Successfully unmounted %s.", mountPoint)
+		// Linux unmounting
+		if _, err := s.runCommand(ctx, "sudo", "umount", mountPoint); err != nil {
+			dfOutput, checkErr := s.runCommand(ctx, "df", mountPoint)
+			if checkErr == nil && strings.Contains(string(dfOutput), mountPoint) { // If still mounted, then error
+				return nil, fmt.Errorf("failed to unmount %s: %w. Output: %s", mountPoint, err, string(dfOutput))
+			}
+			s.logger.Warn().Msgf("CreateSnapshot: Unmount of %s failed but it seems not mounted anymore: %v", mountPoint, err)
+		} else {
+			s.logger.Info().Msgf("CreateSnapshot: Successfully unmounted %s.", mountPoint)
+		}
 	}
 
 	// Update TTL tag on volume to extend until 10min from now
