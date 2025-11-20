@@ -1,9 +1,8 @@
 const childProcess = require('child_process')
 const os = require('os')
 const process = require('process')
-const path = require('path')
 
-const ARGS = ''.split(',').filter(arg => arg !== '')
+const ARGS = ''.split(',')
 const WINDOWS = 'win32'
 const LINUX = 'linux'
 const AMD64 = 'x64'
@@ -20,18 +19,21 @@ function chooseBinary() {
         return `main-linux-arm64`
     }
     if (platform === WINDOWS && arch === AMD64) {
-        return `main-windows-amd64.exe`
+        return `main-windows-amd64`
     }
 
     console.error(`Unsupported platform (${platform}) and architecture (${arch})`)
-    process.exit(0)
+    process.exit(1)
 }
 
 function main() {
     const binary = chooseBinary()
-    const mainScript = path.join(__dirname, binary)
+    const mainScript = `${__dirname}/${binary}`
     if (os.platform() === WINDOWS) {
-        childProcess.execFileSync(mainScript, ARGS, { stdio: 'inherit' })
+        childProcess.execFileSync('powershell', [
+            '-Command',
+            `Start-Process -FilePath "${mainScript}" -ArgumentList "${ARGS.join(' ')}" -Verb RunAs -WindowStyle Hidden -Wait`
+        ], { stdio: 'inherit' })
     } else {
         childProcess.execFileSync('sudo', ['-n', '-E', mainScript, ...ARGS], { stdio: 'inherit' })
     }
