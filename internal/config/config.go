@@ -86,7 +86,7 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 	if path == "" {
 		action.Fatalf("Path is required.")
 	}
-	if !strings.HasPrefix(path, "/") {
+	if !filepath.IsAbs(path) {
 		action.Fatalf("Path '%s' must be an absolute path.", path)
 	}
 	cfg.Path = path
