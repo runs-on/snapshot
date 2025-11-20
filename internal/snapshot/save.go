@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,30 +43,64 @@ func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) 
 	
 	// Windows and Linux handle unmounting differently
 	if s.platform() == "windows" {
-		// On Windows, remove the drive letter assignment
-		driveLetter := ""
-		if len(mountPoint) >= 2 && mountPoint[1] == ':' {
-			driveLetter = strings.ToUpper(string(mountPoint[0]))
-		} else if strings.HasPrefix(mountPoint, "C:\\") || strings.HasPrefix(mountPoint, "D:\\") {
-			// Extract drive letter from path
-			driveLetter = strings.ToUpper(string(mountPoint[0]))
+		windowsMountPoint := volumeInfo.MountPoint
+		if windowsMountPoint == "" {
+			windowsMountPoint = mountPoint
 		}
-		
-		if driveLetter != "" {
-			s.logger.Info().Msgf("CreateSnapshot: Removing drive letter %s: assignment...", driveLetter)
-			psScript := fmt.Sprintf(`
-				$partition = Get-Partition | Where-Object { $_.DriveLetter -eq '%s' }
-				if ($partition) {
-					$partition | Remove-PartitionAccessPath -AccessPath '%s:' -Confirm:$false
-					Write-Output "Drive letter removed"
-				} else {
-					Write-Output "Partition not found or already removed"
+		windowsMountPoint = strings.ReplaceAll(windowsMountPoint, "/", "\\")
+		for strings.Contains(windowsMountPoint, "\\\\") {
+			windowsMountPoint = strings.ReplaceAll(windowsMountPoint, "\\\\", "\\")
+		}
+
+		diskNumber := ""
+		if strings.HasPrefix(volumeInfo.DeviceName, `\\.\PhysicalDrive`) {
+			diskNumber = strings.TrimPrefix(volumeInfo.DeviceName, `\\.\PhysicalDrive`)
+		}
+		if diskNumber == "" {
+			s.logger.Warn().Msg("CreateSnapshot: Unable to determine disk number for Windows volume, skipping access path removal")
+		} else {
+			isDriveLetter := false
+			driveLetter := ""
+			if len(windowsMountPoint) >= 2 && windowsMountPoint[1] == ':' {
+				driveLetter = strings.ToUpper(string(windowsMountPoint[0]))
+				if len(windowsMountPoint) == 2 || (len(windowsMountPoint) == 3 && (windowsMountPoint[2] == '\\' || windowsMountPoint[2] == '/')) {
+					isDriveLetter = true
 				}
-			`, driveLetter, driveLetter)
-			if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
-				s.logger.Warn().Msgf("CreateSnapshot: Failed to remove drive letter %s: (may already be removed): %v", driveLetter, err)
+			}
+
+			if isDriveLetter {
+				s.logger.Info().Msgf("CreateSnapshot: Removing drive letter %s: assignment...", driveLetter)
+				psScript := fmt.Sprintf(`
+					$partition = Get-Partition -DiskNumber %s | Where-Object { $_.DriveLetter -eq '%s' } | Select-Object -First 1
+					if ($partition) {
+						Remove-PartitionAccessPath -DiskNumber %s -PartitionNumber $partition.PartitionNumber -AccessPath "%s:\\" -Confirm:$false
+						Write-Output "Drive letter removed"
+					} else {
+						Write-Output "Drive letter %s not found on disk %s"
+					}
+				`, diskNumber, driveLetter, diskNumber, driveLetter, driveLetter, diskNumber)
+				if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+					s.logger.Warn().Msgf("CreateSnapshot: Failed to remove drive letter %s: %v", driveLetter, err)
+				} else {
+					s.logger.Info().Msgf("CreateSnapshot: Successfully removed drive letter %s.", driveLetter)
+				}
 			} else {
-				s.logger.Info().Msgf("CreateSnapshot: Successfully removed drive letter %s:.", driveLetter)
+				pathQuoted := strconv.Quote(strings.TrimRight(windowsMountPoint, "\\"))
+				s.logger.Info().Msgf("CreateSnapshot: Removing access path %s...", windowsMountPoint)
+				psScript := fmt.Sprintf(`
+					$partition = Get-Partition -DiskNumber %s | Where-Object { $_.AccessPaths -contains %s } | Select-Object -First 1
+					if ($partition) {
+						Remove-PartitionAccessPath -DiskNumber %s -PartitionNumber $partition.PartitionNumber -AccessPath %s -Confirm:$false
+						Write-Output "Access path removed"
+					} else {
+						Write-Output "Access path not found on disk %s"
+					}
+				`, diskNumber, pathQuoted, diskNumber, pathQuoted, diskNumber)
+				if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+					s.logger.Warn().Msgf("CreateSnapshot: Failed to remove access path %s: %v", windowsMountPoint, err)
+				} else {
+					s.logger.Info().Msgf("CreateSnapshot: Successfully removed access path %s.", windowsMountPoint)
+				}
 			}
 		}
 	} else {

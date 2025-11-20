@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -291,27 +292,16 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 
 // restoreSnapshotWindows handles Windows-specific volume mounting
 func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *types.Volume, deviceName string, mountPoint string, volumeIsNewAndUnformatted bool) (*RestoreSnapshotOutput, error) {
-	// On Windows, deviceName is like /dev/xvdf or /dev/nvme1n1, but we need to find the disk number
-	// Convert device name to Windows disk number using PowerShell
 	s.logger.Info().Msgf("RestoreSnapshot: Finding Windows disk for device %s...", deviceName)
 
-	// Extract disk identifier from device name (e.g., xvdf -> f, nvme1n1 -> 1)
-	// For Windows, we'll use PowerShell to find the disk by matching the device path
-	// The device path in EC2 Windows instances maps to disk numbers
-
-	// Use PowerShell to get disk information
-	// First, wait a bit for the disk to appear in Windows
 	time.Sleep(2 * time.Second)
 
-	// Get all disks and find the one that matches our volume
-	// We'll use Get-Disk and match by size or by checking which disk is new
-	psScript := `
+	findDiskScript := `
 		$disks = Get-Disk | Where-Object { $_.OperationalStatus -eq 'Offline' -or $_.PartitionStyle -eq 'Raw' }
 		if ($disks) {
 			$disk = $disks | Select-Object -First 1
 			Write-Output $disk.Number
 		} else {
-			# Try to find by checking recently attached disks
 			$allDisks = Get-Disk | Sort-Object Number
 			$disk = $allDisks | Where-Object { $_.Number -ne 0 } | Select-Object -First 1
 			if ($disk) {
@@ -322,59 +312,125 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 		}
 	`
 
-	diskNumOutput, err := s.runCommand(ctx, "powershell", "-Command", psScript)
+	diskNumOutput, err := s.runCommand(ctx, "powershell", "-Command", findDiskScript)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find Windows disk: %w", err)
 	}
 	diskNumber := strings.TrimSpace(string(diskNumOutput))
+	if diskNumber == "" {
+		return nil, fmt.Errorf("could not determine Windows disk number for device %s", deviceName)
+	}
 	s.logger.Info().Msgf("RestoreSnapshot: Found Windows disk number: %s", diskNumber)
 
-	// Extract drive letter from mountPoint or assign a new one
-	// On Windows, volumes are mounted as drive letters, not directories
-	// If mountPoint is a full path like "C:\test-volume", we'll assign an available drive letter
-	// and create the directory structure on that drive
-	driveLetter := ""
-	targetPath := ""
-
-	// Check if mountPoint is just a drive letter (e.g., "E:" or "E:\")
-	if len(mountPoint) >= 2 && mountPoint[1] == ':' && (len(mountPoint) == 2 || (len(mountPoint) == 3 && (mountPoint[2] == '\\' || mountPoint[2] == '/'))) {
-		driveLetter = strings.ToUpper(string(mountPoint[0])) + ":"
-		targetPath = driveLetter + "\\"
-	} else {
-		// mountPoint is a full path - assign an available drive letter and use the path
-		psScript = `
-			$drives = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -match '^[A-Z]$' } | Select-Object -ExpandProperty Name
-			$available = 'E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z' | Where-Object { $drives -notcontains $_ }
-			if ($available) {
-				Write-Output ($available | Select-Object -First 1)
-			} else {
-				Write-Error "No available drive letter"
-			}
-		`
-		driveOutput, err := s.runCommand(ctx, "powershell", "-Command", psScript)
-		if err != nil {
-			return nil, fmt.Errorf("failed to find available drive letter: %w", err)
+	// Ensure disk is online and writable
+	psScript := fmt.Sprintf(`
+		$disk = Get-Disk -Number %s
+		if ($disk.IsOffline) {
+			Set-Disk -Number %s -IsOffline $false -Confirm:$false
 		}
-		driveLetter = strings.TrimSpace(string(driveOutput)) + ":"
-		// Normalize the path and extract the path component (remove drive letter if present)
-		normalizedPath := strings.ReplaceAll(mountPoint, "/", "\\")
-		// Extract path component (everything after the drive letter and colon)
-		pathComponent := normalizedPath
-		if len(normalizedPath) >= 3 && normalizedPath[1] == ':' {
-			pathComponent = normalizedPath[2:]
-			// Remove leading backslashes
-			pathComponent = strings.TrimPrefix(pathComponent, "\\")
+		if ($disk.IsReadOnly) {
+			Set-Disk -Number %s -IsReadOnly $false -Confirm:$false
 		}
-		// Build target path with assigned drive letter
-		if pathComponent != "" {
-			targetPath = driveLetter + "\\" + pathComponent
-		} else {
-			targetPath = driveLetter + "\\"
-		}
-		s.logger.Info().Msgf("RestoreSnapshot: Assigned drive letter: %s, target path: %s", driveLetter, targetPath)
+	`, diskNumber, diskNumber, diskNumber)
+	if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+		return nil, fmt.Errorf("failed to bring disk %s online: %w", diskNumber, err)
 	}
 
-	// Save volume info before formatting/mounting
+	// Normalize the requested mount path
+	windowsMountPoint := strings.ReplaceAll(mountPoint, "/", "\\")
+	windowsMountPoint = strings.TrimSpace(windowsMountPoint)
+	for strings.Contains(windowsMountPoint, "\\\\") {
+		windowsMountPoint = strings.ReplaceAll(windowsMountPoint, "\\\\", "\\")
+	}
+	if len(windowsMountPoint) < 2 || windowsMountPoint[1] != ':' {
+		return nil, fmt.Errorf("invalid Windows path '%s'. Expected a path like C:\\\\data", mountPoint)
+	}
+
+	isDriveLetter := false
+	driveLetter := strings.ToUpper(string(windowsMountPoint[0]))
+	targetPath := windowsMountPoint
+	if len(windowsMountPoint) == 2 {
+		isDriveLetter = true
+		targetPath = fmt.Sprintf("%s:\\", driveLetter)
+	} else if len(windowsMountPoint) == 3 && (windowsMountPoint[2] == '\\' || windowsMountPoint[2] == '/') {
+		isDriveLetter = true
+		targetPath = fmt.Sprintf("%s:\\", driveLetter)
+	} else {
+		targetPath = strings.TrimRight(targetPath, "\\")
+	}
+
+	if volumeIsNewAndUnformatted {
+		s.logger.Info().Msgf("RestoreSnapshot: Initializing and formatting disk %s with NTFS...", diskNumber)
+		psScript = fmt.Sprintf(`
+			Initialize-Disk -Number %s -PartitionStyle GPT -Confirm:$false
+			$partition = New-Partition -DiskNumber %s -UseMaximumSize -AssignDriveLetter:$false
+			Format-Volume -Partition $partition -FileSystem NTFS -Confirm:$false -Force
+		`, diskNumber, diskNumber)
+		if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+			return nil, fmt.Errorf("failed to initialize/format disk %s: %w", diskNumber, err)
+		}
+	}
+
+	// Get the partition number
+	psScript = fmt.Sprintf(`
+		$partition = Get-Partition -DiskNumber %s | Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+		if ($partition) {
+			Write-Output $partition.PartitionNumber
+		} else {
+			Write-Error "No partition found on disk %s"
+		}
+	`, diskNumber, diskNumber)
+	partitionOutput, err := s.runCommand(ctx, "powershell", "-Command", psScript)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get partition number for disk %s: %w", diskNumber, err)
+	}
+	partitionNumber := strings.TrimSpace(string(partitionOutput))
+	if partitionNumber == "" {
+		return nil, fmt.Errorf("partition number not found for disk %s", diskNumber)
+	}
+
+	// Remove existing access paths (other than the volume GUID) to avoid conflicts
+	psScript = fmt.Sprintf(`
+		$partition = Get-Partition -DiskNumber %s -PartitionNumber %s
+		if ($partition) {
+			foreach ($path in $partition.AccessPaths) {
+				if ($path -and ($path -notmatch '^\\\\\\\\\\\\?\\\\Volume')) {
+					Remove-PartitionAccessPath -DiskNumber %s -PartitionNumber %s -AccessPath $path -Confirm:$false -ErrorAction SilentlyContinue
+				}
+			}
+		}
+	`, diskNumber, partitionNumber, diskNumber, partitionNumber)
+	if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+		s.logger.Warn().Msgf("RestoreSnapshot: Failed to clean existing access paths on disk %s: %v", diskNumber, err)
+	}
+
+	if isDriveLetter {
+		s.logger.Info().Msgf("RestoreSnapshot: Assigning drive letter %s to disk %s...", driveLetter, diskNumber)
+		psScript = fmt.Sprintf(`
+			Set-Partition -DiskNumber %s -PartitionNumber %s -NewDriveLetter '%s' -ErrorAction Stop
+			Write-Output "Drive letter %s assigned"
+		`, diskNumber, partitionNumber, driveLetter, driveLetter)
+		if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+			return nil, fmt.Errorf("failed to assign drive letter %s to disk %s: %w", driveLetter, diskNumber, err)
+		}
+		targetPath = fmt.Sprintf("%s:\\", driveLetter)
+	} else {
+		s.logger.Info().Msgf("RestoreSnapshot: Mounting disk %s to path %s...", diskNumber, targetPath)
+		pathQuoted := strconv.Quote(targetPath)
+		psScript = fmt.Sprintf(`
+			New-Item -ItemType Directory -Path %s -Force | Out-Null
+			$existing = Get-Partition | Where-Object { $_.AccessPaths -contains %s } | Select-Object -First 1
+			if ($existing -and $existing.DiskNumber -ne %s) {
+				Write-Error ("Access path %s is already used by disk " + $existing.DiskNumber)
+			}
+			Add-PartitionAccessPath -DiskNumber %s -PartitionNumber %s -AccessPath %s -ErrorAction Stop
+			Write-Output ("Access path added: %s")
+		`, pathQuoted, pathQuoted, diskNumber, targetPath, diskNumber, partitionNumber, pathQuoted, targetPath)
+		if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+			return nil, fmt.Errorf("failed to mount disk %s at %s: %w", diskNumber, targetPath, err)
+		}
+	}
+
 	volumeInfo := &VolumeInfo{
 		VolumeID:   *newVolume.VolumeId,
 		DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber),
@@ -383,60 +439,6 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 	}
 	if err := s.saveVolumeInfo(volumeInfo); err != nil {
 		s.logger.Warn().Msgf("RestoreSnapshot: Failed to save volume info: %v", err)
-	}
-
-	if volumeIsNewAndUnformatted {
-		s.logger.Info().Msgf("RestoreSnapshot: Initializing and formatting disk %s with NTFS...", diskNumber)
-		// Initialize disk, create partition, format with NTFS, and assign drive letter
-		psScript = fmt.Sprintf(`
-			Initialize-Disk -Number %s -PartitionStyle GPT -Confirm:$false
-			$partition = New-Partition -DiskNumber %s -UseMaximumSize -AssignDriveLetter
-			Format-Volume -Partition $partition -FileSystem NTFS -Confirm:$false -Force
-			$partition | Set-Partition -NewDriveLetter '%c'
-			Write-Output "Disk formatted and drive letter assigned"
-		`, diskNumber, diskNumber, driveLetter[0])
-
-		if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
-			return nil, fmt.Errorf("failed to format disk %s: %w", diskNumber, err)
-		}
-		s.logger.Info().Msgf("RestoreSnapshot: Disk %s formatted with NTFS and assigned drive letter %s.", diskNumber, driveLetter)
-	} else {
-		// Volume from snapshot - just assign drive letter to existing partition
-		s.logger.Info().Msgf("RestoreSnapshot: Assigning drive letter %s to disk %s...", driveLetter, diskNumber)
-		psScript = fmt.Sprintf(`
-			$disk = Get-Disk -Number %s
-			if ($disk.PartitionStyle -eq 'Raw') {
-				Initialize-Disk -Number %s -PartitionStyle GPT -Confirm:$false
-				$partition = New-Partition -DiskNumber %s -UseMaximumSize -AssignDriveLetter
-				Format-Volume -Partition $partition -FileSystem NTFS -Confirm:$false -Force
-			}
-			$partition = Get-Partition -DiskNumber %s | Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
-			if ($partition) {
-				$partition | Set-Partition -NewDriveLetter '%c'
-				Write-Output "Drive letter assigned"
-			} else {
-				Write-Error "No partition found on disk"
-			}
-		`, diskNumber, diskNumber, diskNumber, diskNumber, driveLetter[0])
-
-		if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
-			return nil, fmt.Errorf("failed to assign drive letter to disk %s: %w", diskNumber, err)
-		}
-		s.logger.Info().Msgf("RestoreSnapshot: Drive letter %s assigned to disk %s.", driveLetter, diskNumber)
-	}
-
-	// Create the target directory structure if needed
-	if targetPath != driveLetter+"\\" {
-		s.logger.Info().Msgf("RestoreSnapshot: Creating directory structure %s...", targetPath)
-		psScript = fmt.Sprintf(`
-			New-Item -ItemType Directory -Path "%s" -Force | Out-Null
-			Write-Output "Directory created"
-		`, targetPath)
-		if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
-			s.logger.Warn().Msgf("RestoreSnapshot: Failed to create directory %s: %v", targetPath, err)
-		} else {
-			s.logger.Info().Msgf("RestoreSnapshot: Directory %s created.", targetPath)
-		}
 	}
 
 	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber), NewVolume: volumeIsNewAndUnformatted}, nil
