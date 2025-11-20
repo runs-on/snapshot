@@ -32,9 +32,14 @@ jobs:
           repository: runs-on-demo/benchmark-posthog
           submodules: recursive
           path: repo
+      - name: Determine upstream commit SHA
+        id: upstream
+        run: echo "sha=$(cd repo/upstream && git rev-parse HEAD)" >> $GITHUB_OUTPUT
       - uses: docker/build-push-action@v4
         with:
-          context: ./repo/upstream
+          context: https://github.com/PostHog/posthog.git#${{ steps.upstream.outputs.sha }}
+          build-args: |
+            BUILDKIT_CONTEXT_KEEP_GIT_DIR=1
 
   restore-only:
     name: "save: false"
