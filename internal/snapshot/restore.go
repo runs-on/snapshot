@@ -329,13 +329,19 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 	diskNumber := strings.TrimSpace(string(diskNumOutput))
 	s.logger.Info().Msgf("RestoreSnapshot: Found Windows disk number: %s", diskNumber)
 
-	// Extract drive letter from mountPoint (e.g., "C:\test-volume" -> "C", or "E:" -> "E")
+	// Extract drive letter from mountPoint or assign a new one
+	// On Windows, volumes are mounted as drive letters, not directories
+	// If mountPoint is a full path like "C:\test-volume", we'll assign an available drive letter
+	// and create the directory structure on that drive
 	driveLetter := ""
-	if len(mountPoint) >= 2 && mountPoint[1] == ':' {
+	targetPath := ""
+
+	// Check if mountPoint is just a drive letter (e.g., "E:" or "E:\")
+	if len(mountPoint) >= 2 && mountPoint[1] == ':' && (len(mountPoint) == 2 || (len(mountPoint) == 3 && (mountPoint[2] == '\\' || mountPoint[2] == '/'))) {
 		driveLetter = strings.ToUpper(string(mountPoint[0])) + ":"
+		targetPath = driveLetter + "\\"
 	} else {
-		// If mountPoint is a path, extract the drive letter or assign a new one
-		// For Windows, we'll assign the next available drive letter starting from E:
+		// mountPoint is a full path - assign an available drive letter and use the path
 		psScript = `
 			$drives = Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -match '^[A-Z]$' } | Select-Object -ExpandProperty Name
 			$available = 'E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z' | Where-Object { $drives -notcontains $_ }
@@ -350,14 +356,29 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 			return nil, fmt.Errorf("failed to find available drive letter: %w", err)
 		}
 		driveLetter = strings.TrimSpace(string(driveOutput)) + ":"
-		s.logger.Info().Msgf("RestoreSnapshot: Assigned drive letter: %s", driveLetter)
+		// Normalize the path and extract the path component (remove drive letter if present)
+		normalizedPath := strings.ReplaceAll(mountPoint, "/", "\\")
+		// Extract path component (everything after the drive letter and colon)
+		pathComponent := normalizedPath
+		if len(normalizedPath) >= 3 && normalizedPath[1] == ':' {
+			pathComponent = normalizedPath[2:]
+			// Remove leading backslashes
+			pathComponent = strings.TrimPrefix(pathComponent, "\\")
+		}
+		// Build target path with assigned drive letter
+		if pathComponent != "" {
+			targetPath = driveLetter + "\\" + pathComponent
+		} else {
+			targetPath = driveLetter + "\\"
+		}
+		s.logger.Info().Msgf("RestoreSnapshot: Assigned drive letter: %s, target path: %s", driveLetter, targetPath)
 	}
 
 	// Save volume info before formatting/mounting
 	volumeInfo := &VolumeInfo{
 		VolumeID:   *newVolume.VolumeId,
 		DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber),
-		MountPoint: driveLetter + "\\",
+		MountPoint: targetPath,
 		NewVolume:  volumeIsNewAndUnformatted,
 	}
 	if err := s.saveVolumeInfo(volumeInfo); err != nil {
@@ -404,11 +425,18 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 		s.logger.Info().Msgf("RestoreSnapshot: Drive letter %s assigned to disk %s.", driveLetter, diskNumber)
 	}
 
-	// Update mountPoint to use the drive letter
-	if !strings.HasSuffix(mountPoint, "\\") && !strings.HasSuffix(mountPoint, "/") {
-		mountPoint = driveLetter + "\\"
-	} else {
-		mountPoint = driveLetter + "\\"
+	// Create the target directory structure if needed
+	if targetPath != driveLetter+"\\" {
+		s.logger.Info().Msgf("RestoreSnapshot: Creating directory structure %s...", targetPath)
+		psScript = fmt.Sprintf(`
+			New-Item -ItemType Directory -Path "%s" -Force | Out-Null
+			Write-Output "Directory created"
+		`, targetPath)
+		if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+			s.logger.Warn().Msgf("RestoreSnapshot: Failed to create directory %s: %v", targetPath, err)
+		} else {
+			s.logger.Info().Msgf("RestoreSnapshot: Directory %s created.", targetPath)
+		}
 	}
 
 	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber), NewVolume: volumeIsNewAndUnformatted}, nil
