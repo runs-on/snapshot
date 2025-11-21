@@ -66,4 +66,31 @@ jobs:
           path: C:\test-volume
           volume_size: 10
           save: true
-      - run: dir C:\test-volume
+      - name: Display all disks and mountpoints
+        shell: pwsh
+        run: |
+          Write-Host "=== All Disks ==="
+          Get-Disk | Format-Table Number, PartitionStyle, OperationalStatus, Size, FriendlyName -AutoSize
+          Write-Host "`n=== All Partitions ==="
+          Get-Partition | Format-Table DiskNumber, PartitionNumber, DriveLetter, AccessPaths, Size -AutoSize
+          Write-Host "`n=== All Volumes ==="
+          Get-Volume | Format-Table DriveLetter, FileSystemLabel, FileSystem, Size, SizeRemaining -AutoSize
+          Write-Host "`n=== Mount Points ==="
+          Get-Partition | Where-Object { $_.AccessPaths } | ForEach-Object {
+            Write-Host "Disk $($_.DiskNumber), Partition $($_.PartitionNumber):"
+            $_.AccessPaths | ForEach-Object { Write-Host "  $_" }
+          }
+      - name: Test write to mounted volume
+        shell: pwsh
+        run: |
+          $testFile = "C:\test-volume\test-file.txt"
+          $testContent = "Test file written at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+          Write-Host "Writing test file to $testFile"
+          Set-Content -Path $testFile -Value $testContent
+          Write-Host "File written successfully"
+          Write-Host "`n=== Verifying file ==="
+          Get-Item $testFile | Format-List FullName, Length, LastWriteTime
+          Write-Host "File contents:"
+          Get-Content $testFile
+          Write-Host "`n=== Directory listing ==="
+          Get-ChildItem C:\test-volume | Format-Table Name, Length, LastWriteTime -AutoSize
