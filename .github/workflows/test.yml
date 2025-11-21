@@ -96,7 +96,7 @@ jobs:
           Get-ChildItem C:\test-volume | Format-Table Name, Length, LastWriteTime -AutoSize
 
   test-windows-no-save:
-    name: Test Linux without save
+    name: Test Windows without save
     runs-on: runs-on=${{ github.run_id }}/image=windows25-full-x64/family=m7a.large
     steps:
       - uses: actions/checkout@v4
