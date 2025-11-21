@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 jobs:
-  build-with-snapshot:
-    name: Build with Snapshot
+  test-linux-with-save:
+    name: Test Linux with save
     runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.2xlarge
     steps:
       - uses: actions/checkout@v4
@@ -41,8 +41,8 @@ jobs:
           build-args: |
             BUILDKIT_CONTEXT_KEEP_GIT_DIR=1
 
-  restore-only:
-    name: "save: false"
+  test-linux-no-save:
+    name: Test Linux without save
     runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.2xlarge
     steps:
       - uses: actions/checkout@v4
@@ -56,8 +56,8 @@ jobs:
           dd if=/dev/zero of=/path/to/volume/test-file-1gb bs=1M count=1024
           ls -lh /path/to/volume/
 
-  test-windows:
-    name: Test Windows
+  test-windows-with-save:
+    name: Test Windows with save
     runs-on: runs-on=${{ github.run_id }}/image=windows25-full-x64/family=m7a.large
     steps:
       - uses: actions/checkout@v4
@@ -94,3 +94,28 @@ jobs:
           Get-Content $testFile
           Write-Host "`n=== Directory listing ==="
           Get-ChildItem C:\test-volume | Format-Table Name, Length, LastWriteTime -AutoSize
+
+  test-windows-no-save:
+    name: Test Linux without save
+    runs-on: runs-on=${{ github.run_id }}/image=windows25-full-x64/family=m7a.large
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          path: C:\test-volume
+          volume_size: 10
+          save: false
+      - name: Display all disks and mountpoints
+        shell: pwsh
+        run: |
+          Write-Host "=== All Disks ==="
+          Get-Disk | Format-Table Number, PartitionStyle, OperationalStatus, Size, FriendlyName -AutoSize
+          Write-Host "`n=== All Partitions ==="
+          Get-Partition | Format-Table DiskNumber, PartitionNumber, DriveLetter, AccessPaths, Size -AutoSize
+          Write-Host "`n=== All Volumes ==="
+          Get-Volume | Format-Table DriveLetter, FileSystemLabel, FileSystem, Size, SizeRemaining -AutoSize
+          Write-Host "`n=== Mount Points ==="
+          Get-Partition | Where-Object { $_.AccessPaths } | ForEach-Object {
+            Write-Host "Disk $($_.DiskNumber), Partition $($_.PartitionNumber):"
+            $_.AccessPaths | ForEach-Object { Write-Host "  $_" }
+          }
