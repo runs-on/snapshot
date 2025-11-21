@@ -339,7 +339,7 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 	// Stop ShellHWDetection, initialize/format raw disk, get disk number
 	psScript := `
 		$ErrorActionPreference = 'Stop'
-		Stop-Service -Name ShellHWDetection -ErrorAction SilentlyContinue
+		Stop-Service -Name ShellHWDetection
 		try {
 			Write-Host "Searching for raw disks..."
 			$allDisks = Get-Disk | Select-Object Number, PartitionStyle, OperationalStatus, Size, FriendlyName
@@ -373,7 +373,7 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 			Write-Error "Error details: $($_.Exception | Format-List -Force | Out-String)"
 			exit 1
 		} finally {
-			Start-Service -Name ShellHWDetection -ErrorAction SilentlyContinue
+			Start-Service -Name ShellHWDetection
 		}
 	`
 
@@ -388,12 +388,29 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 	}
 
 	// Parse disk number and partition number from output
-	parts := strings.Split(strings.TrimSpace(string(output)), ",")
-	if len(parts) != 2 {
-		return nil, fmt.Errorf("unexpected output from disk initialization: %s", string(output))
+	// The actual result is at the end: "diskNumber,partitionNumber"
+	// Extract the last line that matches the expected format
+	outputStr := strings.TrimSpace(string(output))
+	lines := strings.Split(outputStr, "\n")
+	var resultLine string
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		// Look for line matching "number,number" pattern
+		if parts := strings.Split(line, ","); len(parts) == 2 {
+			if strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != "" {
+				resultLine = line
+				break
+			}
+		}
 	}
-	diskNumber := parts[0]
-	partitionNumber := parts[1]
+
+	if resultLine == "" {
+		return nil, fmt.Errorf("unexpected output from disk initialization. Could not find disk/partition numbers. Full output:\n%s", outputStr)
+	}
+
+	parts := strings.Split(resultLine, ",")
+	diskNumber := strings.TrimSpace(parts[0])
+	partitionNumber := strings.TrimSpace(parts[1])
 
 	s.logger.Info().Msgf("RestoreSnapshot: Initialized disk %s, partition %s", diskNumber, partitionNumber)
 
