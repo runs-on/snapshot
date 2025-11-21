@@ -333,10 +333,17 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 		s.logger.Warn().Msgf("Failed to list disks: %v", listErr)
 	}
 
-	// Use AWS's documented approach: Stop ShellHWDetection, process raw disks, restart service
-	s.logger.Info().Msgf("RestoreSnapshot: Initializing raw disk using AWS recommended workflow...")
+	// Get expected volume size in bytes for matching GPT disks
+	expectedSizeBytes := int64(s.config.VolumeSize) * 1024 * 1024 * 1024 // Convert GiB to bytes
+	if newVolume.Size != nil {
+		expectedSizeBytes = int64(*newVolume.Size) * 1024 * 1024 * 1024
+	}
 
-	// Stop ShellHWDetection, initialize/format raw disk, get disk number
+	var diskNumber, partitionNumber string
+	var isNewVolume bool
+
+	// First, try to find and initialize a raw disk (new volume)
+	s.logger.Info().Msgf("RestoreSnapshot: Checking for raw disk (new volume)...")
 	psScript := `
 		$ErrorActionPreference = 'Stop'
 		Stop-Service -Name ShellHWDetection
@@ -348,11 +355,8 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 			
 			$disk = Get-Disk | Where-Object { $_.PartitionStyle -eq 'raw' } | Select-Object -First 1
 			if (-not $disk) {
-				$diskInfo = $allDisks | Format-Table -AutoSize | Out-String
-				Write-Host "No raw disk found. Available disks:"
-				Write-Host $diskInfo
-				Write-Error "No raw disk found"
-				exit 1
+				Write-Host "No raw disk found"
+				exit 0
 			}
 			$diskNumber = $disk.Number
 			Write-Host "Found raw disk: $diskNumber (Size: $($disk.Size), Status: $($disk.OperationalStatus))"
@@ -378,41 +382,100 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 	`
 
 	output, err := s.runCommand(ctx, "powershell", "-Command", psScript)
-	if err != nil {
-		// Include full PowerShell output in error message
-		outputStr := string(output)
-		if outputStr == "" {
-			outputStr = "(no output)"
-		}
-		return nil, fmt.Errorf("failed to initialize raw disk. PowerShell output:\n%s\nError: %w", outputStr, err)
-	}
-
-	// Parse disk number and partition number from output
-	// The actual result is at the end: "diskNumber,partitionNumber"
-	// Extract the last line that matches the expected format
-	outputStr := strings.TrimSpace(string(output))
-	lines := strings.Split(outputStr, "\n")
-	var resultLine string
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(lines[i])
-		// Look for line matching "number,number" pattern
-		if parts := strings.Split(line, ","); len(parts) == 2 {
-			if strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != "" {
-				resultLine = line
-				break
+	if err == nil && len(output) > 0 {
+		// Successfully initialized raw disk - parse output
+		outputStr := strings.TrimSpace(string(output))
+		lines := strings.Split(outputStr, "\n")
+		var resultLine string
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := strings.TrimSpace(lines[i])
+			if parts := strings.Split(line, ","); len(parts) == 2 {
+				if strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != "" {
+					resultLine = line
+					break
+				}
 			}
 		}
+		if resultLine != "" {
+			parts := strings.Split(resultLine, ",")
+			diskNumber = strings.TrimSpace(parts[0])
+			partitionNumber = strings.TrimSpace(parts[1])
+			isNewVolume = true
+			s.logger.Info().Msgf("RestoreSnapshot: Initialized new raw disk %s, partition %s", diskNumber, partitionNumber)
+		}
 	}
 
-	if resultLine == "" {
-		return nil, fmt.Errorf("unexpected output from disk initialization. Could not find disk/partition numbers. Full output:\n%s", outputStr)
+	// If no raw disk found, look for GPT disk matching expected size (existing snapshot)
+	if diskNumber == "" {
+		s.logger.Info().Msgf("RestoreSnapshot: No raw disk found, looking for GPT disk matching size %d bytes...", expectedSizeBytes)
+		psScript = fmt.Sprintf(`
+			$ErrorActionPreference = 'Stop'
+			$expectedSize = %d
+			$tolerance = 104857600
+			Write-Host "Searching for GPT disk matching size $expectedSize (tolerance: $tolerance bytes)..."
+			
+			$allDisks = Get-Disk | Select-Object Number, PartitionStyle, OperationalStatus, Size, FriendlyName
+			Write-Host "All disks found:"
+			$allDisks | Format-Table -AutoSize | Out-String | Write-Host
+			
+			$matchingDisks = Get-Disk | Where-Object { 
+				$_.PartitionStyle -eq 'GPT' -and 
+				$_.Number -ne 0 -and 
+				[Math]::Abs($_.Size - $expectedSize) -lt $tolerance
+			} | Sort-Object Number
+			
+			if (-not $matchingDisks) {
+				Write-Error "No GPT disk found matching expected size $expectedSize"
+				exit 1
+			}
+			
+			$disk = $matchingDisks | Select-Object -First 1
+			$diskNumber = $disk.Number
+			Write-Host "Found matching GPT disk: $diskNumber (Size: $($disk.Size), Expected: $expectedSize)"
+			
+			$partition = Get-Partition -DiskNumber $diskNumber | Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+			if (-not $partition) {
+				Write-Error "No partition found on disk $diskNumber"
+				exit 1
+			}
+			
+			Write-Host "Found partition $($partition.PartitionNumber) on disk $diskNumber"
+			Write-Output "$diskNumber,$($partition.PartitionNumber)"
+		`, expectedSizeBytes)
+
+		output, err = s.runCommand(ctx, "powershell", "-Command", psScript)
+		if err != nil {
+			outputStr := string(output)
+			if outputStr == "" {
+				outputStr = "(no output)"
+			}
+			return nil, fmt.Errorf("failed to find GPT disk matching expected size. PowerShell output:\n%s\nError: %w", outputStr, err)
+		}
+
+		// Parse disk and partition numbers
+		outputStr := strings.TrimSpace(string(output))
+		lines := strings.Split(outputStr, "\n")
+		var resultLine string
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := strings.TrimSpace(lines[i])
+			if parts := strings.Split(line, ","); len(parts) == 2 {
+				if strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != "" {
+					resultLine = line
+					break
+				}
+			}
+		}
+
+		if resultLine == "" {
+			return nil, fmt.Errorf("unexpected output from GPT disk search. Could not find disk/partition numbers. Full output:\n%s", outputStr)
+		}
+
+		parts := strings.Split(resultLine, ",")
+		diskNumber = strings.TrimSpace(parts[0])
+		partitionNumber = strings.TrimSpace(parts[1])
+		isNewVolume = false
+		s.logger.Info().Msgf("RestoreSnapshot: Found existing GPT disk %s, partition %s", diskNumber, partitionNumber)
 	}
-
-	parts := strings.Split(resultLine, ",")
-	diskNumber := strings.TrimSpace(parts[0])
-	partitionNumber := strings.TrimSpace(parts[1])
-
-	s.logger.Info().Msgf("RestoreSnapshot: Initialized disk %s, partition %s", diskNumber, partitionNumber)
 
 	// Mount the initialized disk to the requested path
 	if isDriveLetter {
@@ -441,14 +504,14 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 		VolumeID:   *newVolume.VolumeId,
 		DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber),
 		MountPoint: targetPath,
-		NewVolume:  true,
+		NewVolume:  isNewVolume,
 	}
 	if err := s.saveVolumeInfo(volumeInfo); err != nil {
 		s.logger.Warn().Msgf("RestoreSnapshot: Failed to save volume info: %v", err)
 	}
 
 	s.logger.Info().Msgf("RestoreSnapshot: Successfully mounted volume to %s", targetPath)
-	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber), NewVolume: true}, nil
+	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber), NewVolume: isNewVolume}, nil
 }
 
 func replaceFilterValues(filters []types.Filter, name string, values []string) error {
