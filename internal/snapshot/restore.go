@@ -430,26 +430,39 @@ func (s *AWSSnapshotter) findWindowsDiskNumber(ctx context.Context, deviceName s
 	s.logger.Info().Msgf("RestoreSnapshot: Locating Windows disk for AWS volume %s (device hint %s)...", *volume.VolumeId, deviceName)
 
 	fullID, shortID := sanitizeVolumeIdentifiers(*volume.VolumeId)
+	deviceHints := sanitizeDeviceHints(deviceName)
 	psScript := fmt.Sprintf(`
-	$targetFull = "%s"
-	$targetShort = "%s"
-	function Normalize($value) {
-		if ([string]::IsNullOrEmpty($value)) { return "" }
-		return ($value.ToUpper() -replace '[^A-Z0-9]', '')
-	}
-	$targets = @($targetFull, $targetShort) | Where-Object { $_ -ne "" }
-	foreach ($disk in Get-Disk) {
-		$serial = Normalize($disk.SerialNumber)
-		$location = Normalize($disk.Location)
+$targets = @(%s) | Where-Object { $_ -ne "" }
+$deviceHints = @(%s) | Where-Object { $_ -ne "" }
+function Normalize($value) {
+	if ([string]::IsNullOrEmpty($value)) { return "" }
+	return ($value.ToUpper() -replace '[^A-Z0-9]', '')
+}
+foreach ($disk in Get-Disk) {
+	$fields = @(
+		Normalize($disk.SerialNumber),
+		Normalize($disk.Location),
+		Normalize($disk.Path),
+		Normalize($disk.FriendlyName),
+		Normalize($disk.UniqueId)
+	)
+	foreach ($field in $fields) {
 		foreach ($target in $targets) {
-			if ($target -eq "") { continue }
-			if (($serial -and $serial.Contains($target)) -or ($location -and $location.Contains($target))) {
+			if ($target -ne "" -and $field -and $field.Contains($target)) {
 				Write-Output $disk.Number
 				exit 0
 			}
 		}
 	}
-`, fullID, shortID)
+	$normalizedLocation = Normalize($disk.Location)
+	foreach ($hint in $deviceHints) {
+		if ($hint -ne "" -and $normalizedLocation -and $normalizedLocation.Contains($hint)) {
+			Write-Output $disk.Number
+			exit 0
+		}
+	}
+}
+`, buildPowerShellArray([]string{fullID, shortID}), buildPowerShellArray(deviceHints))
 
 	diskNumOutput, err := s.runCommand(ctx, "powershell", "-Command", psScript)
 	if err == nil {
@@ -505,6 +518,78 @@ func sanitizeAlphaNumeric(value string) string {
 		}
 	}
 	return builder.String()
+}
+
+func sanitizeDeviceHints(deviceName string) []string {
+	var hints []string
+	deviceName = strings.TrimSpace(deviceName)
+	if deviceName == "" {
+		return hints
+	}
+
+	rawUpper := strings.ToUpper(deviceName)
+	sanitized := sanitizeAlphaNumeric(rawUpper)
+	if sanitized != "" {
+		hints = append(hints, sanitized)
+	}
+
+	if strings.HasPrefix(sanitized, "DEV") && len(sanitized) > 3 {
+		hints = append(hints, sanitized[3:])
+	}
+
+	if trimmed := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(strings.ToUpper(deviceName), "/DEV/"), "/DEV"), "/dev/"); trimmed != "" {
+		hints = append(hints, sanitizeAlphaNumeric(trimmed))
+	}
+
+	if strings.HasPrefix(sanitized, "NVME") && len(sanitized) > 4 {
+		hints = append(hints, sanitized[4:])
+	}
+
+	if idx := strings.LastIndex(sanitized, "XVD"); idx >= 0 && idx+3 < len(sanitized) {
+		hints = append(hints, sanitized[idx+3:])
+	}
+
+	lastSegment := sanitizeAlphaNumeric(strings.ToUpper(strings.TrimPrefix(deviceName, "/dev/")))
+	if lastSegment != "" {
+		hints = append(hints, lastSegment)
+	}
+
+	return uniqueStrings(hints)
+}
+
+func buildPowerShellArray(values []string) string {
+	values = uniqueStrings(values)
+	if len(values) == 0 {
+		return `""`
+	}
+
+	parts := make([]string, 0, len(values))
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		parts = append(parts, strconv.Quote(v))
+	}
+	if len(parts) == 0 {
+		return `""`
+	}
+	return strings.Join(parts, ", ")
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	var result []string
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		result = append(result, v)
+	}
+	return result
 }
 
 func replaceFilterValues(filters []types.Filter, name string, values []string) error {
