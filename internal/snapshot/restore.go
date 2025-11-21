@@ -321,37 +321,70 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 		targetPath = strings.TrimRight(targetPath, "\\")
 	}
 
+	// First, list all disks for debugging
+	s.logger.Info().Msgf("RestoreSnapshot: Listing all available disks...")
+	listDisksScript := `
+		Get-Disk | Select-Object Number, PartitionStyle, OperationalStatus, Size, FriendlyName | Format-Table -AutoSize | Out-String
+	`
+	listOutput, listErr := s.runCommand(ctx, "powershell", "-Command", listDisksScript)
+	if listErr == nil {
+		s.logger.Info().Msgf("Available disks:\n%s", string(listOutput))
+	} else {
+		s.logger.Warn().Msgf("Failed to list disks: %v", listErr)
+	}
+
 	// Use AWS's documented approach: Stop ShellHWDetection, process raw disks, restart service
 	s.logger.Info().Msgf("RestoreSnapshot: Initializing raw disk using AWS recommended workflow...")
 
 	// Stop ShellHWDetection, initialize/format raw disk, get disk number
 	psScript := `
-		Stop-Service -Name ShellHWDetection
 		$ErrorActionPreference = 'Stop'
+		Stop-Service -Name ShellHWDetection -ErrorAction SilentlyContinue
 		try {
+			Write-Host "Searching for raw disks..."
+			$allDisks = Get-Disk | Select-Object Number, PartitionStyle, OperationalStatus, Size, FriendlyName
+			Write-Host "All disks found:"
+			$allDisks | Format-Table -AutoSize | Out-String | Write-Host
+			
 			$disk = Get-Disk | Where-Object { $_.PartitionStyle -eq 'raw' } | Select-Object -First 1
 			if (-not $disk) {
-				$allDisks = Get-Disk | Select-Object Number, PartitionStyle, OperationalStatus | Format-Table | Out-String
-				Write-Host "Available disks: $allDisks"
-				throw "No raw disk found. All disks: $allDisks"
+				$diskInfo = $allDisks | Format-Table -AutoSize | Out-String
+				Write-Host "No raw disk found. Available disks:"
+				Write-Host $diskInfo
+				Write-Error "No raw disk found"
+				exit 1
 			}
 			$diskNumber = $disk.Number
-			Write-Host "Found raw disk: $diskNumber"
+			Write-Host "Found raw disk: $diskNumber (Size: $($disk.Size), Status: $($disk.OperationalStatus))"
+			
+			Write-Host "Initializing disk $diskNumber..."
 			Initialize-Disk -Number $diskNumber -PartitionStyle GPT -Confirm:$false
+			
+			Write-Host "Creating partition on disk $diskNumber..."
 			$partition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -AssignDriveLetter:$false
+			
+			Write-Host "Formatting partition $($partition.PartitionNumber) with NTFS..."
 			Format-Volume -Partition $partition -FileSystem NTFS -Confirm:$false -Force | Out-Null
+			
+			Write-Host "Successfully initialized disk $diskNumber, partition $($partition.PartitionNumber)"
 			Write-Output "$diskNumber,$($partition.PartitionNumber)"
 		} catch {
-			Write-Error $_.Exception.Message
-			throw
+			Write-Error "PowerShell error: $($_.Exception.Message)"
+			Write-Error "Error details: $($_.Exception | Format-List -Force | Out-String)"
+			exit 1
 		} finally {
-			Start-Service -Name ShellHWDetection
+			Start-Service -Name ShellHWDetection -ErrorAction SilentlyContinue
 		}
 	`
 
 	output, err := s.runCommand(ctx, "powershell", "-Command", psScript)
 	if err != nil {
-		return nil, fmt.Errorf("failed to initialize raw disk: %w", err)
+		// Include full PowerShell output in error message
+		outputStr := string(output)
+		if outputStr == "" {
+			outputStr = "(no output)"
+		}
+		return nil, fmt.Errorf("failed to initialize raw disk. PowerShell output:\n%s\nError: %w", outputStr, err)
 	}
 
 	// Parse disk number and partition number from output
