@@ -292,33 +292,11 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 
 // restoreSnapshotWindows handles Windows-specific volume mounting
 func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *types.Volume, deviceName string, mountPoint string, volumeIsNewAndUnformatted bool) (*RestoreSnapshotOutput, error) {
-	s.logger.Info().Msgf("RestoreSnapshot: Finding Windows disk for device %s...", deviceName)
-
 	time.Sleep(2 * time.Second)
 
-	findDiskScript := `
-		$disks = Get-Disk | Where-Object { $_.OperationalStatus -eq 'Offline' -or $_.PartitionStyle -eq 'Raw' }
-		if ($disks) {
-			$disk = $disks | Select-Object -First 1
-			Write-Output $disk.Number
-		} else {
-			$allDisks = Get-Disk | Sort-Object Number
-			$disk = $allDisks | Where-Object { $_.Number -ne 0 } | Select-Object -First 1
-			if ($disk) {
-				Write-Output $disk.Number
-			} else {
-				Write-Error "No suitable disk found"
-			}
-		}
-	`
-
-	diskNumOutput, err := s.runCommand(ctx, "powershell", "-Command", findDiskScript)
+	diskNumber, err := s.findWindowsDiskNumber(ctx, deviceName, newVolume)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find Windows disk: %w", err)
-	}
-	diskNumber := strings.TrimSpace(string(diskNumOutput))
-	if diskNumber == "" {
-		return nil, fmt.Errorf("could not determine Windows disk number for device %s", deviceName)
+		return nil, err
 	}
 	s.logger.Info().Msgf("RestoreSnapshot: Found Windows disk number: %s", diskNumber)
 
@@ -442,6 +420,91 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 	}
 
 	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber), NewVolume: volumeIsNewAndUnformatted}, nil
+}
+
+func (s *AWSSnapshotter) findWindowsDiskNumber(ctx context.Context, deviceName string, volume *types.Volume) (string, error) {
+	if volume == nil || volume.VolumeId == nil || *volume.VolumeId == "" {
+		return "", fmt.Errorf("volume ID is missing while locating Windows disk for device %s", deviceName)
+	}
+
+	s.logger.Info().Msgf("RestoreSnapshot: Locating Windows disk for AWS volume %s (device hint %s)...", *volume.VolumeId, deviceName)
+
+	fullID, shortID := sanitizeVolumeIdentifiers(*volume.VolumeId)
+	psScript := fmt.Sprintf(`
+	$targetFull = "%s"
+	$targetShort = "%s"
+	function Normalize($value) {
+		if ([string]::IsNullOrEmpty($value)) { return "" }
+		return ($value.ToUpper() -replace '[^A-Z0-9]', '')
+	}
+	$targets = @($targetFull, $targetShort) | Where-Object { $_ -ne "" }
+	foreach ($disk in Get-Disk) {
+		$serial = Normalize($disk.SerialNumber)
+		$location = Normalize($disk.Location)
+		foreach ($target in $targets) {
+			if ($target -eq "") { continue }
+			if (($serial -and $serial.Contains($target)) -or ($location -and $location.Contains($target))) {
+				Write-Output $disk.Number
+				exit 0
+			}
+		}
+	}
+`, fullID, shortID)
+
+	diskNumOutput, err := s.runCommand(ctx, "powershell", "-Command", psScript)
+	if err == nil {
+		diskNumber := strings.TrimSpace(string(diskNumOutput))
+		if diskNumber != "" {
+			return diskNumber, nil
+		}
+		s.logger.Warn().Msg("RestoreSnapshot: Disk lookup by volume ID returned empty result, falling back to offline/raw detection")
+	} else {
+		s.logger.Warn().Msgf("RestoreSnapshot: Disk lookup by volume ID failed (%v), falling back to offline/raw detection", err)
+	}
+
+	fallbackScript := `
+		$disks = Get-Disk | Where-Object { $_.OperationalStatus -eq 'Offline' -or $_.PartitionStyle -eq 'Raw' }
+		if ($disks) {
+			$disk = $disks | Select-Object -First 1
+			Write-Output $disk.Number
+		} else {
+			$allDisks = Get-Disk | Sort-Object Number
+			$disk = $allDisks | Where-Object { $_.Number -ne 0 } | Select-Object -First 1
+			if ($disk) {
+				Write-Output $disk.Number
+			} else {
+				Write-Error "No suitable disk found"
+			}
+		}
+	`
+
+	fallbackOutput, fallbackErr := s.runCommand(ctx, "powershell", "-Command", fallbackScript)
+	if fallbackErr != nil {
+		return "", fmt.Errorf("failed to find Windows disk after fallback: %w", fallbackErr)
+	}
+	diskNumber := strings.TrimSpace(string(fallbackOutput))
+	if diskNumber == "" {
+		return "", fmt.Errorf("fallback disk detection did not return a disk number for volume %s", *volume.VolumeId)
+	}
+
+	return diskNumber, nil
+}
+
+func sanitizeVolumeIdentifiers(volumeID string) (string, string) {
+	upper := strings.ToUpper(strings.TrimSpace(volumeID))
+	sanitized := sanitizeAlphaNumeric(upper)
+	short := strings.TrimPrefix(sanitized, "VOL")
+	return sanitized, short
+}
+
+func sanitizeAlphaNumeric(value string) string {
+	var builder strings.Builder
+	for _, r := range value {
+		if r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
 }
 
 func replaceFilterValues(filters []types.Filter, name string, values []string) error {
