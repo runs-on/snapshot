@@ -327,18 +327,26 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 	// Stop ShellHWDetection, initialize/format raw disk, get disk number
 	psScript := `
 		Stop-Service -Name ShellHWDetection
-		$disk = Get-Disk | Where-Object { $_.PartitionStyle -eq 'raw' } | Select-Object -First 1
-		if (-not $disk) {
+		$ErrorActionPreference = 'Stop'
+		try {
+			$disk = Get-Disk | Where-Object { $_.PartitionStyle -eq 'raw' } | Select-Object -First 1
+			if (-not $disk) {
+				$allDisks = Get-Disk | Select-Object Number, PartitionStyle, OperationalStatus | Format-Table | Out-String
+				Write-Host "Available disks: $allDisks"
+				throw "No raw disk found. All disks: $allDisks"
+			}
+			$diskNumber = $disk.Number
+			Write-Host "Found raw disk: $diskNumber"
+			Initialize-Disk -Number $diskNumber -PartitionStyle GPT -Confirm:$false
+			$partition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -AssignDriveLetter:$false
+			Format-Volume -Partition $partition -FileSystem NTFS -Confirm:$false -Force | Out-Null
+			Write-Output "$diskNumber,$($partition.PartitionNumber)"
+		} catch {
+			Write-Error $_.Exception.Message
+			throw
+		} finally {
 			Start-Service -Name ShellHWDetection
-			Write-Error "No raw disk found"
-			exit 1
 		}
-		$diskNumber = $disk.Number
-		Initialize-Disk -Number $diskNumber -PartitionStyle GPT -Confirm:$false
-		$partition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -AssignDriveLetter:$false
-		Format-Volume -Partition $partition -FileSystem NTFS -Confirm:$false -Force | Out-Null
-		Start-Service -Name ShellHWDetection
-		Write-Output "$diskNumber,$($partition.PartitionNumber)"
 	`
 
 	output, err := s.runCommand(ctx, "powershell", "-Command", psScript)

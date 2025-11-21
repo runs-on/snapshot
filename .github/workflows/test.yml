@@ -58,7 +58,7 @@ jobs:
 
   test-windows:
     name: Test Windows
-    runs-on: runs-on=${{ github.run_id }}/image=windows22-full-x64/family=m7a.large
+    runs-on: runs-on=${{ github.run_id }}/image=windows25-full-x64/family=m7a.large
     steps:
       - uses: actions/checkout@v4
       - uses: ./
