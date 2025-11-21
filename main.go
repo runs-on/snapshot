@@ -19,16 +19,14 @@ func handleMainExecution(action *githubactions.Action, ctx context.Context, logg
 		action.Infof("Restoring volume for %s...", cfg.Path)
 		snapshotter, err := snapshot.NewAWSSnapshotter(ctx, logger, cfg)
 		if err != nil {
-			action.Errorf("Failed to create snapshotter: %v", err)
-		} else {
-			action.Infof("Creating snapshot for %s", cfg.Path)
-			snapshotOutput, err := snapshotter.RestoreSnapshot(ctx, cfg.Path)
-			if err != nil {
-				action.Errorf("Failed to restore snapshot for %s: %v", cfg.Path, err)
-			} else {
-				action.Infof("Snapshot restored into volume %s", snapshotOutput.VolumeID)
-			}
+			action.Fatalf("Failed to create snapshotter: %v", err)
 		}
+		action.Infof("Creating snapshot for %s", cfg.Path)
+		snapshotOutput, err := snapshotter.RestoreSnapshot(ctx, cfg.Path)
+		if err != nil {
+			action.Fatalf("Failed to restore snapshot for %s: %v", cfg.Path, err)
+		}
+		action.Infof("Snapshot restored into volume %s", snapshotOutput.VolumeID)
 	}
 
 	action.Infof("Action finished.")
@@ -49,15 +47,13 @@ func handlePostExecution(action *githubactions.Action, ctx context.Context, logg
 		action.Infof("Snapshotting volume for %s...", cfg.Path)
 		snapshotter, err := snapshot.NewAWSSnapshotter(ctx, logger, cfg)
 		if err != nil {
-			action.Errorf("Failed to create snapshotter: %v", err)
-		} else {
-			snapshot, err := snapshotter.CreateSnapshot(ctx, cfg.Path)
-			if err != nil {
-				action.Errorf("Failed to snapshot volumes: %v", err)
-			} else {
-				action.Infof("Snapshot created: %s. Note that it might take a few minutes to be available for use.", snapshot.SnapshotID)
-			}
+			action.Fatalf("Failed to create snapshotter: %v", err)
 		}
+		snapshot, err := snapshotter.CreateSnapshot(ctx, cfg.Path)
+		if err != nil {
+			action.Fatalf("Failed to snapshot volumes: %v", err)
+		}
+		action.Infof("Snapshot created: %s. Note that it might take a few minutes to be available for use.", snapshot.SnapshotID)
 	}
 	action.Infof("Post-execution phase finished.")
 }
