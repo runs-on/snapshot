@@ -231,7 +231,7 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 		NewVolume:  volumeIsNewAndUnformatted,
 	}
 	if err := s.saveVolumeInfo(volumeInfo); err != nil {
-		s.logger.Warn().Msgf("RestoreSnapshot: Failed to save volume info: %v", err)
+		return nil, fmt.Errorf("failed to save volume info: %w", err)
 	}
 
 	if volumeIsNewAndUnformatted {
@@ -492,7 +492,7 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 		NewVolume:  isNewVolume,
 	}
 	if err := s.saveVolumeInfo(volumeInfo); err != nil {
-		s.logger.Warn().Msgf("RestoreSnapshot: Failed to save volume info: %v", err)
+		return nil, fmt.Errorf("failed to save volume info: %w", err)
 	}
 
 	s.logger.Info().Msgf("RestoreSnapshot: Successfully mounted volume to %s", targetPath)

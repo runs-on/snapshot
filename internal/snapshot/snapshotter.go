@@ -2,6 +2,8 @@ package snapshot
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -222,7 +224,10 @@ func (s *AWSSnapshotter) loadVolumeInfo(mountPoint string) (*VolumeInfo, error) 
 	infoPath := getVolumeInfoPath(mountPoint)
 	data, err := os.ReadFile(infoPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read volume info file: %w", err)
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("volume info file not found at %s: volume may not have been restored properly. Ensure RestoreSnapshot completed successfully before calling CreateSnapshot: %w", infoPath, err)
+		}
+		return nil, fmt.Errorf("failed to read volume info file at %s: %w", infoPath, err)
 	}
 
 	var volumeInfo VolumeInfo
@@ -262,15 +267,14 @@ func (s *AWSSnapshotter) runCommand(ctx context.Context, name string, arg ...str
 
 // getVolumeInfoPath returns the path to the volume info JSON file for a given mount point
 func getVolumeInfoPath(mountPoint string) string {
-	// Replace slashes with hyphens and remove leading/trailing hyphens
-	sanitizedPath := strings.Trim(strings.ReplaceAll(mountPoint, "/", "-"), "-")
-	sanitizedPath = strings.Trim(strings.ReplaceAll(sanitizedPath, "\\", "-"), "-")
-	sanitizedPath = strings.Trim(strings.ReplaceAll(sanitizedPath, ":", "-"), "-")
+	// Hash the mount point using SHA256 to avoid collisions and handle special characters
+	hash := sha256.Sum256([]byte(mountPoint))
+	hashHex := hex.EncodeToString(hash[:])
 	
 	// Use platform-appropriate base path
 	basePath := "/runs-on"
 	if runtime.GOOS == "windows" {
 		basePath = "C:\\runs-on"
 	}
-	return filepath.Join(basePath, fmt.Sprintf("snapshot-%s.json", sanitizedPath))
+	return filepath.Join(basePath, fmt.Sprintf("snapshot-%s.json", hashHex))
 }

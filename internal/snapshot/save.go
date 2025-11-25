@@ -23,7 +23,7 @@ func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) 
 	// Load volume info from JSON file
 	volumeInfo, err := s.loadVolumeInfo(mountPoint)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load volume info: %w", err)
+		return nil, fmt.Errorf("failed to load volume info for mount point %s: %w", mountPoint, err)
 	}
 
 	// 2. Operations on jobVolumeID
