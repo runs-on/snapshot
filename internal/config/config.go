@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,11 +27,14 @@ type Config struct {
 	VolumeInitializationRate int32
 	VolumeName               string
 	GithubRef                string
+	GithubFullRef            string
 	GithubRepository         string
 	InstanceID               string
 	Az                       string
 	CustomTags               []Tag
 	SnapshotName             string
+	SnapshotKey              string
+	RestoreKeys              []string
 	RunnerConfig             *RunnerConfig
 }
 
@@ -48,6 +52,7 @@ type RunnerConfig struct {
 func NewConfigFromInputs(action *githubactions.Action) *Config {
 	cfg := &Config{
 		GithubRef:        os.Getenv("GITHUB_REF_NAME"),
+		GithubFullRef:    os.Getenv("GITHUB_REF"),
 		GithubRepository: os.Getenv("GITHUB_REPOSITORY"),
 		InstanceID:       os.Getenv("RUNS_ON_INSTANCE_ID"),
 		Az:               os.Getenv("RUNS_ON_AWS_AZ"),
@@ -99,6 +104,17 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 	cfg.WaitForCompletion = action.GetInput("wait_for_completion") != "false"
 	cfg.Save = action.GetInput("save") != "false"
 
+	rawKey := strings.TrimSpace(action.GetInput("key"))
+	if rawKey == "" {
+		rawKey = defaultSnapshotKey(cfg.GithubRef, cfg.GithubFullRef)
+	}
+	cfg.SnapshotKey = rawKey
+
+	cfg.RestoreKeys = parseRestoreKeys(action.GetInput("restore-keys"))
+	if len(cfg.RestoreKeys) == 0 {
+		cfg.RestoreKeys = defaultRestoreKeys(cfg.GithubRef, cfg.RunnerConfig.DefaultBranch)
+	}
+
 	volumeType := action.GetInput("volume_type")
 	if volumeType == "" {
 		volumeType = "gp3"
@@ -133,4 +149,45 @@ func parseInt(action *githubactions.Action, input string, min int, max int) int3
 		action.Fatalf("Invalid value '%s': must be at most %d", value, max)
 	}
 	return int32(valueInt)
+}
+
+func parseRestoreKeys(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	lines := strings.Split(raw, "\n")
+	keys := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		keys = append(keys, line)
+	}
+	return keys
+}
+
+func defaultSnapshotKey(refName, fullRef string) string {
+	if refName == "" && fullRef == "" {
+		return ""
+	}
+	if refName == "" {
+		return fullRef
+	}
+	if fullRef == "" {
+		return refName
+	}
+	return fmt.Sprintf("%s-%s", refName, fullRef)
+}
+
+func defaultRestoreKeys(refName, defaultBranch string) []string {
+	restoreKeys := make([]string, 0, 2)
+	if refName != "" {
+		restoreKeys = append(restoreKeys, fmt.Sprintf("%s-", refName))
+	}
+	if defaultBranch != "" {
+		restoreKeys = append(restoreKeys, fmt.Sprintf("%s-", defaultBranch))
+	}
+	return restoreKeys
 }

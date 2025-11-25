@@ -24,58 +24,43 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 
 	var newVolume *types.Volume
 	var volumeIsNewAndUnformatted bool
-	// 1. Find latest snapshot for branch
-	filters := []types.Filter{
-		{Name: aws.String("status"), Values: []string{string(types.SnapshotStateCompleted)}},
-	}
-	for _, tag := range s.defaultTags() {
-		filters = append(filters, types.Filter{Name: aws.String(fmt.Sprintf("tag:%s", *tag.Key)), Values: []string{*tag.Value}})
-	}
-	s.logger.Info().Msgf("RestoreSnapshot: Searching for the latest snapshot for branch: %s and filters: %s", gitBranch, utils.PrettyPrint(filters))
-	snapshotsOutput, err := s.ec2Client.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{
-		Filters:  filters,
-		OwnerIds: []string{"self"}, // Or specific account ID if needed
-	})
+
+	baseFilters := s.baseSnapshotFilters()
+	s.logger.Info().Msgf("RestoreSnapshot: Base filters: %s", utils.PrettyPrint(baseFilters))
+
+	latestSnapshot, err := s.findSnapshotByKeyCandidates(ctx, baseFilters)
 	if err != nil {
-		return nil, fmt.Errorf("failed to describe snapshots for branch %s: %w", gitBranch, err)
+		return nil, err
 	}
 
-	var latestSnapshot *types.Snapshot
-	if len(snapshotsOutput.Snapshots) > 0 {
-		// Find most recent snapshot by comparing timestamps
-		latestSnapshot = &snapshotsOutput.Snapshots[0]
-		for _, snap := range snapshotsOutput.Snapshots {
-			if snapTime := snap.StartTime; snapTime.After(*latestSnapshot.StartTime) {
-				latestSnapshot = &snap
-			}
-		}
-		s.logger.Info().Msgf("RestoreSnapshot: Found latest snapshot %s for branch %s", *latestSnapshot.SnapshotId, gitBranch)
-	} else if s.config.RunnerConfig.DefaultBranch != "" {
-		// Try finding snapshot from default branch
-		if err := replaceFilterValues(filters, "tag:"+snapshotTagKeyBranch, []string{s.getSnapshotTagValueDefaultBranch()}); err != nil {
-			return nil, fmt.Errorf("failed to find default branch filter: %w", err)
-		}
-
-		s.logger.Info().Msgf("RestoreSnapshot: No snapshot found for branch %s, trying default branch %s with filters: %s", gitBranch, s.config.RunnerConfig.DefaultBranch, utils.PrettyPrint(filters))
-
-		defaultBranchSnapshotsOutput, err := s.ec2Client.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{
-			Filters:  filters,
-			OwnerIds: []string{"self"},
-		})
+	if latestSnapshot == nil {
+		s.logger.Info().Msgf("RestoreSnapshot: No snapshot found via key search, falling back to branch %s", gitBranch)
+		latestSnapshot, err = s.findSnapshotByBranch(ctx, baseFilters, gitBranch)
 		if err != nil {
-			return nil, fmt.Errorf("failed to describe snapshots for default branch %s: %w", s.config.RunnerConfig.DefaultBranch, err)
+			return nil, err
 		}
+		if latestSnapshot != nil {
+			s.logger.Info().Msgf("RestoreSnapshot: Found snapshot %s for branch %s", *latestSnapshot.SnapshotId, gitBranch)
+		}
+	}
 
-		if len(defaultBranchSnapshotsOutput.Snapshots) > 0 {
-			latestSnapshot = &defaultBranchSnapshotsOutput.Snapshots[0]
-			for _, snap := range defaultBranchSnapshotsOutput.Snapshots {
-				if snapTime := snap.StartTime; snapTime.After(*latestSnapshot.StartTime) {
-					latestSnapshot = &snap
-				}
-			}
-			s.logger.Info().Msgf("RestoreSnapshot: Found latest snapshot %s from default branch %s", *latestSnapshot.SnapshotId, s.config.RunnerConfig.DefaultBranch)
-		} else {
+	if latestSnapshot == nil && s.config.RunnerConfig.DefaultBranch != "" {
+		defaultBranch := s.config.RunnerConfig.DefaultBranch
+		s.logger.Info().Msgf("RestoreSnapshot: No snapshot found for branch %s, trying default branch %s", gitBranch, defaultBranch)
+		latestSnapshot, err = s.findSnapshotByBranch(ctx, baseFilters, defaultBranch)
+		if err != nil {
+			return nil, err
+		}
+		if latestSnapshot != nil {
+			s.logger.Info().Msgf("RestoreSnapshot: Found snapshot %s from default branch %s", *latestSnapshot.SnapshotId, defaultBranch)
+		}
+	}
+
+	if latestSnapshot == nil {
+		if s.config.RunnerConfig.DefaultBranch != "" {
 			s.logger.Info().Msgf("RestoreSnapshot: No existing snapshot found for branch %s or default branch %s. A new volume will be created.", gitBranch, s.config.RunnerConfig.DefaultBranch)
+		} else {
+			s.logger.Info().Msgf("RestoreSnapshot: No existing snapshot found for branch %s. A new volume will be created.", gitBranch)
 		}
 	}
 
@@ -514,13 +499,148 @@ func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *
 	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber), NewVolume: isNewVolume}, nil
 }
 
-func replaceFilterValues(filters []types.Filter, name string, values []string) error {
-	for i, filter := range filters {
-		if *filter.Name == name {
-			filters[i].Values = values
-			return nil
+type keyCandidate struct {
+	value  string
+	prefix bool
+}
+
+func (s *AWSSnapshotter) findSnapshotByKeyCandidates(ctx context.Context, baseFilters []types.Filter) (*types.Snapshot, error) {
+	candidates := make([]keyCandidate, 0, 1+len(s.config.RestoreKeys))
+	seen := make(map[string]struct{})
+
+	if s.config.SnapshotKey != "" {
+		candidates = append(candidates, keyCandidate{value: s.config.SnapshotKey})
+		seen[s.config.SnapshotKey] = struct{}{}
+	}
+
+	for _, restoreKey := range s.config.RestoreKeys {
+		restoreKey = strings.TrimSpace(restoreKey)
+		if restoreKey == "" {
+			continue
+		}
+		if _, ok := seen[restoreKey]; ok {
+			continue
+		}
+		candidates = append(candidates, keyCandidate{value: restoreKey, prefix: true})
+		seen[restoreKey] = struct{}{}
+	}
+
+	for _, candidate := range candidates {
+		snapshot, err := s.searchSnapshotByKey(ctx, baseFilters, candidate.value, candidate.prefix)
+		if err != nil {
+			return nil, err
+		}
+		if snapshot != nil {
+			if candidate.prefix {
+				s.logger.Info().Msgf("RestoreSnapshot: Found snapshot %s using restore key prefix %s", *snapshot.SnapshotId, candidate.value)
+			} else {
+				s.logger.Info().Msgf("RestoreSnapshot: Found snapshot %s using exact key %s", *snapshot.SnapshotId, candidate.value)
+			}
+			return snapshot, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *AWSSnapshotter) searchSnapshotByKey(ctx context.Context, baseFilters []types.Filter, key string, prefix bool) (*types.Snapshot, error) {
+	if key == "" {
+		return nil, nil
+	}
+	filters := append([]types.Filter{}, baseFilters...)
+	if !prefix {
+		filters = append(filters, types.Filter{
+			Name:   aws.String(fmt.Sprintf("tag:%s", snapshotTagKeyKey)),
+			Values: []string{key},
+		})
+	}
+
+	snapshots, err := s.describeSnapshotsWithFilters(ctx, filters)
+	if err != nil {
+		return nil, err
+	}
+
+	var latest *types.Snapshot
+	for i := range snapshots {
+		snap := &snapshots[i]
+		tagValue := getTagValueByKey(snap.Tags, snapshotTagKeyKey)
+		if tagValue == "" {
+			continue
+		}
+		if prefix {
+			if !strings.HasPrefix(tagValue, key) {
+				continue
+			}
+		} else if tagValue != key {
+			continue
+		}
+		if latest == nil || (snap.StartTime != nil && (latest.StartTime == nil || snap.StartTime.After(*latest.StartTime))) {
+			latest = snap
 		}
 	}
 
-	return fmt.Errorf("filter %s not found in filters: %v", name, utils.PrettyPrint(filters))
+	return latest, nil
+}
+
+func (s *AWSSnapshotter) findSnapshotByBranch(ctx context.Context, baseFilters []types.Filter, branch string) (*types.Snapshot, error) {
+	if branch == "" {
+		return nil, nil
+	}
+
+	filters := append([]types.Filter{}, baseFilters...)
+	filters = append(filters, types.Filter{
+		Name:   aws.String(fmt.Sprintf("tag:%s", snapshotTagKeyBranch)),
+		Values: []string{branch},
+	})
+
+	snapshots, err := s.describeSnapshotsWithFilters(ctx, filters)
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe snapshots for branch %s: %w", branch, err)
+	}
+
+	return latestSnapshotFromList(snapshots), nil
+}
+
+func (s *AWSSnapshotter) describeSnapshotsWithFilters(ctx context.Context, filters []types.Filter) ([]types.Snapshot, error) {
+	var allSnapshots []types.Snapshot
+	input := &ec2.DescribeSnapshotsInput{
+		Filters:  filters,
+		OwnerIds: []string{"self"},
+	}
+
+	for {
+		output, err := s.ec2Client.DescribeSnapshots(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		allSnapshots = append(allSnapshots, output.Snapshots...)
+		if output.NextToken == nil {
+			break
+		}
+		input.NextToken = output.NextToken
+	}
+
+	return allSnapshots, nil
+}
+
+func latestSnapshotFromList(snapshots []types.Snapshot) *types.Snapshot {
+	var latest *types.Snapshot
+	for i := range snapshots {
+		snap := &snapshots[i]
+		if snap.StartTime == nil {
+			continue
+		}
+		if latest == nil || latest.StartTime == nil || snap.StartTime.After(*latest.StartTime) {
+			latest = snap
+		}
+	}
+	return latest
+}
+
+func getTagValueByKey(tags []types.Tag, key string) string {
+	for _, tag := range tags {
+		if tag.Key != nil && *tag.Key == key && tag.Value != nil {
+			return *tag.Value
+		}
+	}
+	return ""
 }

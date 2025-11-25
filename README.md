@@ -39,10 +39,32 @@ jobs:
 | volume_initialization_rate | Initialization rate to use for the volume. Useful for very large volumes. 100 MB/s - 200 MB/s: $0.00240/GB, 201 MB/s - 300 MB/s $0.00360/GB | No | 0 |
 | wait_for_completion | Wait for snapshot completion before exiting. Note that the first snapshot will always be waited for | No | false |
 | save | Save the volume in the post step. When false, the volume is not saved, only restored | No | true |
+| key | Custom snapshot key used to segregate snapshots. Defaults to `${{ github.ref_name }}-${{ github.ref }}` | No | auto |
+| restore-keys | Multi-line list of fallback snapshot key prefixes, evaluated top-to-bottom. Defaults to `${{ github.ref_name }}-` and `${{ github.default_branch }}-` | No | auto |
 
 ## Snapshot selection
 
-When restoring a snapshot, the most recent snapshot for the current branch is fetched. If none is found, the most recent snapshot for the repository default branch will be taken. If none found, a new empty volume is used instead.
+Snapshot lookup now mirrors GitHub's cache action semantics:
+
+1. Try the exact `key`.
+2. Fall back through each `restore-keys` prefix (latest snapshot whose key starts with the prefix).
+3. As a compatibility fallback, use the latest snapshot for the current branch, then the repository default branch.
+4. If there's still no match, create a new empty volume.
+
+This keeps the legacy branch-based behavior working while enabling deterministic cache keys for large directories.
+
+### Example: isolation with custom keys
+
+```yaml
+- name: Unity Library Snapshot
+  uses: runs-on/snapshot@v1
+  with:
+    path: ${{ github.workspace }}/Library
+    key: unity-library-${{ hashFiles('Packages/manifest.json') }}
+    restore-keys: |
+      unity-library-${{ github.ref_name }}-
+      unity-library-
+```
 
 ## Snapshot cleanup
 

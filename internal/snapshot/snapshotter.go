@@ -26,6 +26,7 @@ const (
 	snapshotTagKeyBranch     = "runs-on-snapshot-branch"
 	snapshotTagKeyRepository = "runs-on-snapshot-repository"
 	snapshotTagKeyVersion    = "runs-on-snapshot-version"
+	snapshotTagKeyKey        = "runs-on-snapshot-key"
 	nameTagKey               = "Name"
 	timestampTagKey          = "runs-on-timestamp"
 	ttlTagKey                = "runs-on-delete-after"
@@ -161,10 +162,38 @@ func (s *AWSSnapshotter) defaultTags() []types.Tag {
 		{Key: aws.String(snapshotTagKeyArch), Value: aws.String(s.arch())},
 		{Key: aws.String(snapshotTagKeyPlatform), Value: aws.String(s.platform())},
 	}
+	if s.config.SnapshotKey != "" {
+		tags = append(tags, types.Tag{Key: aws.String(snapshotTagKeyKey), Value: aws.String(s.config.SnapshotKey)})
+	}
 	for _, tag := range s.config.CustomTags {
 		tags = append(tags, types.Tag{Key: aws.String(tag.Key), Value: aws.String(tag.Value)})
 	}
 	return tags
+}
+
+func (s *AWSSnapshotter) baseSnapshotFilters() []types.Filter {
+	filters := []types.Filter{
+		{Name: aws.String("status"), Values: []string{string(types.SnapshotStateCompleted)}},
+	}
+	tagFilters := []struct {
+		key   string
+		value string
+	}{
+		{snapshotTagKeyVersion, s.config.Version},
+		{snapshotTagKeyRepository, s.config.GithubRepository},
+		{snapshotTagKeyArch, s.arch()},
+		{snapshotTagKeyPlatform, s.platform()},
+	}
+	for _, tag := range tagFilters {
+		if tag.value == "" {
+			continue
+		}
+		filters = append(filters, types.Filter{
+			Name:   aws.String(fmt.Sprintf("tag:%s", tag.key)),
+			Values: []string{tag.value},
+		})
+	}
+	return filters
 }
 
 // saveVolumeInfo writes volume information to a JSON file
