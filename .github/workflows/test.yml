@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./
         with:
+          version: ${{ github.job_name }}
           path: /var/lib/docker
           volume_size: 60
       - run: df -ah && sudo ls -al /var/lib/docker
@@ -48,6 +49,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./
         with:
+          version: ${{ github.job_name }}
           path: /path/to/volume
           volume_size: 10
           save: false
@@ -63,6 +65,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./
         with:
+          version: ${{ github.job_name }}
           path: C:\test-volume
           volume_size: 10
           save: true
@@ -102,6 +105,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./
         with:
+          version: ${{ github.job_name }}
           path: C:\test-volume
           volume_size: 10
           save: false
