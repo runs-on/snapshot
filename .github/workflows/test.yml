@@ -49,12 +49,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./
         with:
-          version: ${{ github.job }}
+          version: ${{ github.job }}-v2
           path: /path/to/volume
           volume_size: 10
           save: false
       - run: |
-          sudo chown -R runner:runner /path/to/volume
           dd if=/dev/zero of=/path/to/volume/test-file-1gb bs=1M count=1024
           ls -lh /path/to/volume/
 
