@@ -44,10 +44,10 @@ inputs:
     required: false
     default: 'true'
   key:
-    description: 'Custom snapshot key. Defaults to `${{ github.ref_name }}-${{ github.ref }}` when unset.'
+    description: 'Custom snapshot key. Defaults to github.ref_name-github.ref when unset.'
     required: false
     default: ''
   restore-keys:
-    description: 'Multiline list of fallback snapshot key prefixes (one per line). Defaults to `${{ github.ref_name }}-` and `${{ github.default_branch }}-`.'
+    description: 'Multiline list of fallback snapshot key prefixes (one per line). Defaults to github.ref_name- and github.default_branch- prefixes.'
     required: false
     default: ''
