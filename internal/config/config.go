@@ -98,7 +98,11 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 	}
 	cfg.Path = path
 
-	cfg.Version = action.GetInput("version")
+	cfg.Version = strings.TrimSpace(action.GetInput("version"))
+	// Fallback to environment variable directly in case GetInput doesn't work
+	if cfg.Version == "" {
+		cfg.Version = strings.TrimSpace(os.Getenv("INPUT_VERSION"))
+	}
 	if cfg.Version == "" {
 		cfg.Version = "v1"
 	}
