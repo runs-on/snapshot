@@ -51,3 +51,7 @@ inputs:
     description: 'Multiline list of fallback snapshot key prefixes (one per line). Defaults to github.ref_name- and github.default_branch- prefixes.'
     required: false
     default: ''
+
+outputs:
+  cache-hit:
+    description: 'Whether the volume was restored from an existing snapshot (true) or created as a new volume (false).'

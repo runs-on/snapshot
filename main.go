@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"os"
+	"strconv"
 
 	"github.com/rs/zerolog"
 	"github.com/runs-on/snapshot/internal/config"
@@ -27,6 +28,8 @@ func handleMainExecution(action *githubactions.Action, ctx context.Context, logg
 			action.Fatalf("Failed to restore snapshot for %s: %v", cfg.Path, err)
 		}
 		action.Infof("Snapshot restored into volume %s", snapshotOutput.VolumeID)
+		cacheHit := !snapshotOutput.NewVolume
+		action.SetOutput("cache-hit", strconv.FormatBool(cacheHit))
 	}
 
 	action.Infof("Action finished.")
