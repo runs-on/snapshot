@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -252,6 +253,19 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 		return nil, fmt.Errorf("failed to mount %s to %s: %w", actualDeviceName, mountPoint, err)
 	}
 	s.logger.Info().Msgf("RestoreSnapshot: Device %s mounted to %s.", actualDeviceName, mountPoint)
+
+	// Chown the mount point to RUNS_ON_AGENT_USER if set (non-recursive)
+	agentUser := os.Getenv("RUNS_ON_AGENT_USER")
+	if agentUser != "" {
+		s.logger.Info().Msgf("RestoreSnapshot: Changing ownership of %s to %s...", mountPoint, agentUser)
+		if _, err := s.runCommand(ctx, "sudo", "chown", agentUser, mountPoint); err != nil {
+			s.logger.Warn().Msgf("RestoreSnapshot: Failed to chown %s to %s: %v", mountPoint, agentUser, err)
+		} else {
+			s.logger.Info().Msgf("RestoreSnapshot: Successfully changed ownership of %s to %s.", mountPoint, agentUser)
+		}
+	} else {
+		s.logger.Info().Msgf("RestoreSnapshot: RUNS_ON_AGENT_USER not set, skipping chown.")
+	}
 
 	if strings.HasPrefix(mountPoint, "/var/lib/docker") {
 		s.logger.Info().Msgf("RestoreSnapshot: Starting docker service...")
