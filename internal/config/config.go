@@ -91,6 +91,8 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 	if path == "" {
 		action.Fatalf("Path is required.")
 	}
+	// Normalize path separators (handles mixed \ and /)
+	path = filepath.Clean(path)
 	if !filepath.IsAbs(path) {
 		action.Fatalf("Path '%s' must be an absolute path.", path)
 	}
