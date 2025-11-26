@@ -125,9 +125,6 @@ func newConfig(action *githubactions.Action, source InputSource) *Config {
 		}
 	}
 
-	// Display current environment variables for debugging
-	action.Infof("Current environment variables: %v", os.Environ())
-
 	requiredTagPresent := false
 	for _, tag := range cfg.RunnerConfig.CustomTags {
 		if tag.Key == requiredTagKey {
