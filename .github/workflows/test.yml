@@ -12,18 +12,32 @@ on:
 permissions:
   contents: read
 
+env:
+  CACHE_BUST: v2
+
 jobs:
   test-linux-with-save:
     name: Test Linux with save
     runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.2xlarge
     steps:
       - uses: actions/checkout@v4
-      - uses: ./
+      - name: snapshot
+        id: snapshot
+        uses: ./
         with:
-          version: ${{ github.job }}
+          version: ${{ env.CACHE_BUST }}-${{ github.job }}
           path: /var/lib/docker
           volume_size: 60
+      - name: Check test file exists if cache hit
+        if: steps.snapshot.outputs.cache-hit == 'true'
+        run: |
+          test -f /var/lib/docker/test-file.txt || (echo "Error: test-file.txt should exist when cache-hit is true" && exit 1)
+          echo "✓ test-file.txt exists as expected"
       - run: df -ah && sudo ls -al /var/lib/docker
+      - name: Create test file
+        run: |
+          echo "Test file created at $(date)" | sudo tee /var/lib/docker/test-file.txt
+          sudo ls -lh /var/lib/docker/test-file.txt
       - uses: docker/setup-buildx-action@v3
         with:
           name: runs-on
@@ -49,7 +63,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./
         with:
-          version: ${{ github.job }}-v2
+          version: ${{ env.CACHE_BUST }}-${{ github.job }}-v2
           path: /path/to/volume
           volume_size: 10
           save: false
@@ -62,12 +76,28 @@ jobs:
     runs-on: runs-on=${{ github.run_id }}/image=windows25-full-x64/family=m7a.large
     steps:
       - uses: actions/checkout@v4
-      - uses: ./
+      - name: snapshot
+        id: snapshot
+        uses: ./
         with:
-          version: ${{ github.job }}
+          version: ${{ env.CACHE_BUST }}-${{ github.job }}
           path: C:\test-volume
           volume_size: 10
           save: true
+      - name: Check test file exists if cache hit
+        if: steps.snapshot.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          $testFile = "C:\test-volume\test-file.txt"
+          if (Test-Path $testFile) {
+            Write-Host "✓ test-file.txt exists as expected"
+            Get-Item $testFile | Format-List FullName, Length, LastWriteTime
+            Write-Host "File contents:"
+            Get-Content $testFile
+          } else {
+            Write-Error "Error: test-file.txt should exist when cache-hit is true"
+            exit 1
+          }
       - name: Display all disks and mountpoints
         shell: pwsh
         run: |
@@ -104,7 +134,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./
         with:
-          version: ${{ github.job }}
+          version: ${{ env.CACHE_BUST }}-${{ github.job }}
           path: C:\test-volume
           volume_size: 10
           save: false
