@@ -1,11 +1,15 @@
 package config
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/sethvargo/go-githubactions"
 )
 
 func TestParseRestoreKeys(t *testing.T) {
@@ -380,3 +384,85 @@ func TestParseAndCleanPathErrorMessages(t *testing.T) {
 	}
 }
 
+func TestNewConfigFromState(t *testing.T) {
+	tDir := t.TempDir()
+	configPath := filepath.Join(tDir, "config.json")
+	runnerCfg := RunnerConfig{
+		DefaultBranch: "develop",
+		CustomTags: []Tag{
+			{Key: requiredTagKey, Value: "stack"},
+			{Key: "env", Value: "test"},
+		},
+	}
+	raw, err := json.Marshal(runnerCfg)
+	if err != nil {
+		t.Fatalf("failed to marshal runner config: %v", err)
+	}
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	path := filepath.Join(tDir, "data")
+	stateVars := map[string]string{
+		"STATE_INPUT_PATH":                       path,
+		"STATE_INPUT_VERSION":                    "v42",
+		"STATE_INPUT_WAIT_FOR_COMPLETION":        "true",
+		"STATE_INPUT_SAVE":                       "false",
+		"STATE_INPUT_KEY":                        "custom-key",
+		"STATE_INPUT_RESTORE_KEYS":               "foo-\nbar-",
+		"STATE_INPUT_VOLUME_TYPE":                "io2",
+		"STATE_INPUT_VOLUME_INITIALIZATION_RATE": "200",
+		"STATE_INPUT_VOLUME_IOPS":                "7000",
+		"STATE_INPUT_VOLUME_THROUGHPUT":          "1000",
+		"STATE_INPUT_VOLUME_SIZE":                "99",
+	}
+	for k, v := range stateVars {
+		t.Setenv(k, v)
+	}
+	t.Setenv("RUNS_ON_HOME", tDir)
+	t.Setenv("RUNS_ON_INSTANCE_ID", "i-123")
+	t.Setenv("RUNS_ON_AWS_AZ", "us-east-1a")
+	t.Setenv("GITHUB_REF_NAME", "feature")
+	t.Setenv("GITHUB_REF", "refs/heads/feature")
+	t.Setenv("GITHUB_REPOSITORY", "runs-on/snapshot")
+
+	action := githubactions.New()
+	cfg := NewConfigFromState(action)
+
+	if cfg.Path != filepath.Clean(path) {
+		t.Fatalf("expected path %s, got %s", filepath.Clean(path), cfg.Path)
+	}
+	if cfg.Version != "v42" {
+		t.Fatalf("expected version v42, got %s", cfg.Version)
+	}
+	if !cfg.WaitForCompletion {
+		t.Fatalf("expected wait_for_completion true")
+	}
+	if cfg.Save {
+		t.Fatalf("expected save false")
+	}
+	if cfg.SnapshotKey != "custom-key" {
+		t.Fatalf("expected snapshot key custom-key, got %s", cfg.SnapshotKey)
+	}
+	if !reflect.DeepEqual(cfg.RestoreKeys, []string{"foo-", "bar-"}) {
+		t.Fatalf("unexpected restore keys: %v", cfg.RestoreKeys)
+	}
+	if cfg.VolumeType != "io2" {
+		t.Fatalf("unexpected volume type %s", cfg.VolumeType)
+	}
+	if cfg.VolumeInitializationRate != 200 {
+		t.Fatalf("unexpected init rate %d", cfg.VolumeInitializationRate)
+	}
+	if cfg.VolumeIops != 7000 {
+		t.Fatalf("unexpected iops %d", cfg.VolumeIops)
+	}
+	if cfg.VolumeThroughput != 1000 {
+		t.Fatalf("unexpected throughput %d", cfg.VolumeThroughput)
+	}
+	if cfg.VolumeSize != 99 {
+		t.Fatalf("unexpected volume size %d", cfg.VolumeSize)
+	}
+	if len(cfg.CustomTags) != 2 {
+		t.Fatalf("expected 2 custom tags, got %d", len(cfg.CustomTags))
+	}
+}

@@ -38,7 +38,7 @@ func handleMainExecution(action *githubactions.Action, ctx context.Context, logg
 // handlePostExecution contains the logic for the post-execution phase.
 func handlePostExecution(action *githubactions.Action, ctx context.Context, logger *zerolog.Logger) {
 	action.Infof("Running post-execution phase...")
-	cfg := config.NewConfigFromInputs(action)
+	cfg := config.NewConfigFromState(action)
 
 	if !cfg.Save {
 		action.Infof("Skipping snapshot creation as 'save' is set to false.")

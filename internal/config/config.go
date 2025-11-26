@@ -15,6 +15,49 @@ import (
 
 const requiredTagKey = "runs-on-stack-name"
 
+// InputSource represents where inputs should be read from.
+type InputSource int
+
+const (
+	// InputSourceWorkflow reads directly from workflow inputs (INPUT_* env vars).
+	InputSourceWorkflow InputSource = iota
+	// InputSourceState reads from action state captured during the main phase.
+	InputSourceState
+)
+
+type inputFetcher func(string) string
+
+func newInputFetcher(action *githubactions.Action, source InputSource) inputFetcher {
+	return func(name string) string {
+		switch source {
+		case InputSourceState:
+			return strings.TrimSpace(os.Getenv(stateEnvVar(name)))
+		default:
+			value := strings.TrimSpace(action.GetInput(name))
+			saveInputState(action, name, value)
+			return value
+		}
+	}
+}
+
+func saveInputState(action *githubactions.Action, name, value string) {
+	action.SaveState(stateKeyForInput(name), value)
+}
+
+func stateEnvVar(name string) string {
+	return fmt.Sprintf("STATE_%s", stateKeyForInput(name))
+}
+
+func stateKeyForInput(name string) string {
+	return fmt.Sprintf("INPUT_%s", normalizeInputName(name))
+}
+
+var inputNameReplacer = strings.NewReplacer(" ", "_", "-", "_")
+
+func normalizeInputName(name string) string {
+	return strings.ToUpper(inputNameReplacer.Replace(name))
+}
+
 type Config struct {
 	Path                     string
 	Version                  string
@@ -48,8 +91,17 @@ type RunnerConfig struct {
 	CustomTags    []Tag  `json:"customTags"`
 }
 
-// NewConfigFromInputs parses action inputs and environment variables to build the Config struct.
+// NewConfigFromInputs parses workflow inputs and stores them in state for the post phase.
 func NewConfigFromInputs(action *githubactions.Action) *Config {
+	return newConfig(action, InputSourceWorkflow)
+}
+
+// NewConfigFromState reconstructs the config using values stored during the main phase.
+func NewConfigFromState(action *githubactions.Action) *Config {
+	return newConfig(action, InputSourceState)
+}
+
+func newConfig(action *githubactions.Action, source InputSource) *Config {
 	cfg := &Config{
 		GithubRef:        os.Getenv("GITHUB_REF_NAME"),
 		GithubFullRef:    os.Getenv("GITHUB_REF"),
@@ -57,6 +109,8 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 		InstanceID:       os.Getenv("RUNS_ON_INSTANCE_ID"),
 		Az:               os.Getenv("RUNS_ON_AWS_AZ"),
 	}
+
+	getInput := newInputFetcher(action, source)
 
 	configBytes, err := os.ReadFile(filepath.Join(os.Getenv("RUNS_ON_HOME"), "config.json"))
 	if err != nil {
@@ -89,14 +143,14 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 		action.Fatalf("Required tag '%s' is not present in the RunsOn config file.", requiredTagKey)
 	}
 
-	pathInput := action.GetInput("path")
+	pathInput := getInput("path")
 	cleanedPath, err := parseAndCleanPath(pathInput)
 	if err != nil {
 		action.Fatalf("%v", err)
 	}
 	cfg.Path = cleanedPath
 
-	cfg.Version = strings.TrimSpace(action.GetInput("version"))
+	cfg.Version = strings.TrimSpace(getInput("version"))
 	// Fallback to environment variable directly in case GetInput doesn't work
 	if cfg.Version == "" {
 		cfg.Version = strings.TrimSpace(os.Getenv("INPUT_VERSION"))
@@ -105,30 +159,30 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 		cfg.Version = "v1"
 	}
 
-	cfg.WaitForCompletion = action.GetInput("wait_for_completion") != "false"
-	cfg.Save = action.GetInput("save") != "false"
+	cfg.WaitForCompletion = getInput("wait_for_completion") != "false"
+	cfg.Save = getInput("save") != "false"
 
-	rawKey := strings.TrimSpace(action.GetInput("key"))
+	rawKey := strings.TrimSpace(getInput("key"))
 	if rawKey == "" {
 		rawKey = defaultSnapshotKey(cfg.GithubRef, cfg.GithubFullRef)
 	}
 	cfg.SnapshotKey = rawKey
 
-	cfg.RestoreKeys = parseRestoreKeys(action.GetInput("restore-keys"))
+	cfg.RestoreKeys = parseRestoreKeys(getInput("restore-keys"))
 	if len(cfg.RestoreKeys) == 0 {
 		cfg.RestoreKeys = defaultRestoreKeys(cfg.GithubRef, cfg.RunnerConfig.DefaultBranch)
 	}
 
-	volumeType := action.GetInput("volume_type")
+	volumeType := getInput("volume_type")
 	if volumeType == "" {
 		volumeType = "gp3"
 	}
 	cfg.VolumeType = types.VolumeType(volumeType)
 
-	cfg.VolumeInitializationRate = parseInt(action, "volume_initialization_rate", 0, 0)
-	cfg.VolumeIops = parseInt(action, "volume_iops", 100, 0)
-	cfg.VolumeThroughput = parseInt(action, "volume_throughput", 100, 0)
-	cfg.VolumeSize = parseInt(action, "volume_size", 1, 0)
+	cfg.VolumeInitializationRate = parseInt(action, getInput, "volume_initialization_rate", 0, 0)
+	cfg.VolumeIops = parseInt(action, getInput, "volume_iops", 100, 0)
+	cfg.VolumeThroughput = parseInt(action, getInput, "volume_throughput", 100, 0)
+	cfg.VolumeSize = parseInt(action, getInput, "volume_size", 1, 0)
 
 	action.Infof("Input 'path': %v", cfg.Path)
 	action.Infof("Input 'version': %s", cfg.Version)
@@ -153,8 +207,8 @@ func parseAndCleanPath(path string) (string, error) {
 	return path, nil
 }
 
-func parseInt(action *githubactions.Action, input string, min int, max int) int32 {
-	value := action.GetInput(input)
+func parseInt(action *githubactions.Action, fetch inputFetcher, input string, min int, max int) int32 {
+	value := fetch(input)
 	if value == "" {
 		action.Fatalf("%s' cannot be empty", input)
 	}
