@@ -71,6 +71,9 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 		}
 	}
 
+	// Display current environment variables for debugging
+	action.Infof("Current environment variables: %v", os.Environ())
+
 	requiredTagPresent := false
 	for _, tag := range cfg.RunnerConfig.CustomTags {
 		if tag.Key == requiredTagKey {
@@ -86,17 +89,12 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 		action.Fatalf("Required tag '%s' is not present in the RunsOn config file.", requiredTagKey)
 	}
 
-	path := action.GetInput("path")
-	path = strings.TrimSpace(path)
-	if path == "" {
-		action.Fatalf("Path is required.")
+	pathInput := action.GetInput("path")
+	cleanedPath, err := parseAndCleanPath(pathInput)
+	if err != nil {
+		action.Fatalf("%v", err)
 	}
-	// Normalize path separators (handles mixed \ and /)
-	path = filepath.Clean(path)
-	if !filepath.IsAbs(path) {
-		action.Fatalf("Path '%s' must be an absolute path.", path)
-	}
-	cfg.Path = path
+	cfg.Path = cleanedPath
 
 	cfg.Version = strings.TrimSpace(action.GetInput("version"))
 	// Fallback to environment variable directly in case GetInput doesn't work
@@ -137,6 +135,22 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 	action.Infof("Input 'wait_for_completion': %t", cfg.WaitForCompletion)
 
 	return cfg
+}
+
+// parseAndCleanPath validates and cleans a path input.
+// It trims whitespace, normalizes path separators, and ensures the path is absolute.
+// Returns an error if the path is empty or not absolute.
+func parseAndCleanPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", fmt.Errorf("path is required")
+	}
+	// Normalize path separators (handles mixed \ and /)
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("path '%s' must be an absolute path", path)
+	}
+	return path, nil
 }
 
 func parseInt(action *githubactions.Action, input string, min int, max int) int32 {

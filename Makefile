@@ -9,6 +9,7 @@ help:
 	@echo '   make main-linux-arm64      Build static binary for linux/arm64'
 	@echo '   make main-windows-amd64    Build static binary for windows/amd64'
 	@echo '   make build	             Build all static binaries + `index.js` and `post.js`'
+	@echo '   make test                  Run all tests'
 	@echo ''
 
 UPX_BIN := $(shell command -v upx 2> /dev/null)
@@ -62,3 +63,7 @@ release: tag
 
 upgrade:
 	mise exec -- go get -u -t ./...
+
+.PHONY: test
+test:
+	mise exec -- go test ./...
