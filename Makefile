@@ -7,7 +7,9 @@ help:
 	@echo '   make js                    Generate `index.js` and `post.js` files'
 	@echo '   make main-linux-amd64      Build static binary for linux/amd64'
 	@echo '   make main-linux-arm64      Build static binary for linux/arm64'
+	@echo '   make main-windows-amd64    Build static binary for windows/amd64'
 	@echo '   make build	             Build all static binaries + `index.js` and `post.js`'
+	@echo '   make test                  Run all tests'
 	@echo ''
 
 UPX_BIN := $(shell command -v upx 2> /dev/null)
@@ -31,8 +33,14 @@ main-linux-arm64: _require-upx
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -installsuffix static -o "main-linux-arm64" $(COMMAND)
 	upx -q -9 "main-linux-arm64"
 
+.PHONY: main-windows-amd64
+main-windows-amd64: _require-upx
+	rm -f main-windows-amd64.exe
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -installsuffix static -o "main-windows-amd64.exe" $(COMMAND)
+	upx -q -9 "main-windows-amd64.exe"
+
 .PHONY: build
-build: main-linux-amd64 main-linux-arm64 js
+build: main-linux-amd64 main-linux-arm64 main-windows-amd64 js
 
 .PHONY: _require-upx
 _require-upx:
@@ -55,3 +63,7 @@ release: tag
 
 upgrade:
 	mise exec -- go get -u -t ./...
+
+.PHONY: test
+test:
+	mise exec -- go test ./...

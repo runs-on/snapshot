@@ -3,6 +3,8 @@ package snapshot
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,58 +25,43 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 
 	var newVolume *types.Volume
 	var volumeIsNewAndUnformatted bool
-	// 1. Find latest snapshot for branch
-	filters := []types.Filter{
-		{Name: aws.String("status"), Values: []string{string(types.SnapshotStateCompleted)}},
-	}
-	for _, tag := range s.defaultTags() {
-		filters = append(filters, types.Filter{Name: aws.String(fmt.Sprintf("tag:%s", *tag.Key)), Values: []string{*tag.Value}})
-	}
-	s.logger.Info().Msgf("RestoreSnapshot: Searching for the latest snapshot for branch: %s and filters: %s", gitBranch, utils.PrettyPrint(filters))
-	snapshotsOutput, err := s.ec2Client.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{
-		Filters:  filters,
-		OwnerIds: []string{"self"}, // Or specific account ID if needed
-	})
+
+	baseFilters := s.baseSnapshotFilters()
+	s.logger.Info().Msgf("RestoreSnapshot: Base filters: %s", utils.PrettyPrint(baseFilters))
+
+	latestSnapshot, err := s.findSnapshotByKeyCandidates(ctx, baseFilters)
 	if err != nil {
-		return nil, fmt.Errorf("failed to describe snapshots for branch %s: %w", gitBranch, err)
+		return nil, err
 	}
 
-	var latestSnapshot *types.Snapshot
-	if len(snapshotsOutput.Snapshots) > 0 {
-		// Find most recent snapshot by comparing timestamps
-		latestSnapshot = &snapshotsOutput.Snapshots[0]
-		for _, snap := range snapshotsOutput.Snapshots {
-			if snapTime := snap.StartTime; snapTime.After(*latestSnapshot.StartTime) {
-				latestSnapshot = &snap
-			}
-		}
-		s.logger.Info().Msgf("RestoreSnapshot: Found latest snapshot %s for branch %s", *latestSnapshot.SnapshotId, gitBranch)
-	} else if s.config.RunnerConfig.DefaultBranch != "" {
-		// Try finding snapshot from default branch
-		if err := replaceFilterValues(filters, "tag:"+snapshotTagKeyBranch, []string{s.getSnapshotTagValueDefaultBranch()}); err != nil {
-			return nil, fmt.Errorf("failed to find default branch filter: %w", err)
-		}
-
-		s.logger.Info().Msgf("RestoreSnapshot: No snapshot found for branch %s, trying default branch %s with filters: %s", gitBranch, s.config.RunnerConfig.DefaultBranch, utils.PrettyPrint(filters))
-
-		defaultBranchSnapshotsOutput, err := s.ec2Client.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{
-			Filters:  filters,
-			OwnerIds: []string{"self"},
-		})
+	if latestSnapshot == nil {
+		s.logger.Info().Msgf("RestoreSnapshot: No snapshot found via key search, falling back to branch %s", gitBranch)
+		latestSnapshot, err = s.findSnapshotByBranch(ctx, baseFilters, gitBranch)
 		if err != nil {
-			return nil, fmt.Errorf("failed to describe snapshots for default branch %s: %w", s.config.RunnerConfig.DefaultBranch, err)
+			return nil, err
 		}
+		if latestSnapshot != nil {
+			s.logger.Info().Msgf("RestoreSnapshot: Found snapshot %s for branch %s", *latestSnapshot.SnapshotId, gitBranch)
+		}
+	}
 
-		if len(defaultBranchSnapshotsOutput.Snapshots) > 0 {
-			latestSnapshot = &defaultBranchSnapshotsOutput.Snapshots[0]
-			for _, snap := range defaultBranchSnapshotsOutput.Snapshots {
-				if snapTime := snap.StartTime; snapTime.After(*latestSnapshot.StartTime) {
-					latestSnapshot = &snap
-				}
-			}
-			s.logger.Info().Msgf("RestoreSnapshot: Found latest snapshot %s from default branch %s", *latestSnapshot.SnapshotId, s.config.RunnerConfig.DefaultBranch)
-		} else {
+	if latestSnapshot == nil && s.config.RunnerConfig.DefaultBranch != "" {
+		defaultBranch := s.config.RunnerConfig.DefaultBranch
+		s.logger.Info().Msgf("RestoreSnapshot: No snapshot found for branch %s, trying default branch %s", gitBranch, defaultBranch)
+		latestSnapshot, err = s.findSnapshotByBranch(ctx, baseFilters, defaultBranch)
+		if err != nil {
+			return nil, err
+		}
+		if latestSnapshot != nil {
+			s.logger.Info().Msgf("RestoreSnapshot: Found snapshot %s from default branch %s", *latestSnapshot.SnapshotId, defaultBranch)
+		}
+	}
+
+	if latestSnapshot == nil {
+		if s.config.RunnerConfig.DefaultBranch != "" {
 			s.logger.Info().Msgf("RestoreSnapshot: No existing snapshot found for branch %s or default branch %s. A new volume will be created.", gitBranch, s.config.RunnerConfig.DefaultBranch)
+		} else {
+			s.logger.Info().Msgf("RestoreSnapshot: No existing snapshot found for branch %s. A new volume will be created.", gitBranch)
 		}
 	}
 
@@ -197,6 +184,12 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 	}
 	s.logger.Info().Msgf("RestoreSnapshot: Volume %s attached as %s.", *newVolume.VolumeId, actualDeviceName)
 
+	// Windows and Linux handle mounting differently
+	if s.platform() == "windows" {
+		return s.restoreSnapshotWindows(ctx, newVolume, actualDeviceName, mountPoint, volumeIsNewAndUnformatted)
+	}
+
+	// Linux mounting logic
 	if strings.HasPrefix(mountPoint, "/var/lib/docker") {
 		// 6. Mounting & Docker
 		s.logger.Info().Msgf("RestoreSnapshot: Stopping docker service...")
@@ -239,7 +232,7 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 		NewVolume:  volumeIsNewAndUnformatted,
 	}
 	if err := s.saveVolumeInfo(volumeInfo); err != nil {
-		s.logger.Warn().Msgf("RestoreSnapshot: Failed to save volume info: %v", err)
+		return nil, fmt.Errorf("failed to save volume info: %w", err)
 	}
 
 	if volumeIsNewAndUnformatted {
@@ -260,6 +253,19 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 		return nil, fmt.Errorf("failed to mount %s to %s: %w", actualDeviceName, mountPoint, err)
 	}
 	s.logger.Info().Msgf("RestoreSnapshot: Device %s mounted to %s.", actualDeviceName, mountPoint)
+
+	// Chown the mount point to RUNS_ON_AGENT_USER if set (non-recursive)
+	agentUser := os.Getenv("RUNS_ON_AGENT_USER")
+	if agentUser != "" {
+		s.logger.Info().Msgf("RestoreSnapshot: Changing ownership of %s to %s...", mountPoint, agentUser)
+		if _, err := s.runCommand(ctx, "sudo", "chown", agentUser, mountPoint); err != nil {
+			s.logger.Warn().Msgf("RestoreSnapshot: Failed to chown %s to %s: %v", mountPoint, agentUser, err)
+		} else {
+			s.logger.Info().Msgf("RestoreSnapshot: Successfully changed ownership of %s to %s.", mountPoint, agentUser)
+		}
+	} else {
+		s.logger.Info().Msgf("RestoreSnapshot: RUNS_ON_AGENT_USER not set, skipping chown.")
+	}
 
 	if strings.HasPrefix(mountPoint, "/var/lib/docker") {
 		s.logger.Info().Msgf("RestoreSnapshot: Starting docker service...")
@@ -283,13 +289,372 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: actualDeviceName, NewVolume: volumeIsNewAndUnformatted}, nil
 }
 
-func replaceFilterValues(filters []types.Filter, name string, values []string) error {
-	for i, filter := range filters {
-		if *filter.Name == name {
-			filters[i].Values = values
-			return nil
+// restoreSnapshotWindows handles Windows-specific volume mounting using AWS's documented approach
+func (s *AWSSnapshotter) restoreSnapshotWindows(ctx context.Context, newVolume *types.Volume, deviceName string, mountPoint string, volumeIsNewAndUnformatted bool) (*RestoreSnapshotOutput, error) {
+	s.logger.Info().Msgf("RestoreSnapshot: Preparing Windows disk for volume %s...", *newVolume.VolumeId)
+
+	// Wait for disk to appear in Windows
+	time.Sleep(3 * time.Second)
+
+	// Normalize the requested mount path
+	windowsMountPoint := strings.ReplaceAll(mountPoint, "/", "\\")
+	windowsMountPoint = strings.TrimSpace(windowsMountPoint)
+	for strings.Contains(windowsMountPoint, "\\\\") {
+		windowsMountPoint = strings.ReplaceAll(windowsMountPoint, "\\\\", "\\")
+	}
+	if len(windowsMountPoint) < 2 || windowsMountPoint[1] != ':' {
+		return nil, fmt.Errorf("invalid Windows path '%s'. Expected a path like C:\\data", mountPoint)
+	}
+
+	// Determine if we're mounting to a drive letter or a folder path
+	isDriveLetter := false
+	driveLetter := strings.ToUpper(string(windowsMountPoint[0]))
+	targetPath := windowsMountPoint
+	if len(windowsMountPoint) == 2 {
+		isDriveLetter = true
+		targetPath = fmt.Sprintf("%s:\\", driveLetter)
+	} else if len(windowsMountPoint) == 3 && (windowsMountPoint[2] == '\\' || windowsMountPoint[2] == '/') {
+		isDriveLetter = true
+		targetPath = fmt.Sprintf("%s:\\", driveLetter)
+	} else {
+		targetPath = strings.TrimRight(targetPath, "\\")
+	}
+
+	// First, list all disks for debugging
+	s.logger.Info().Msgf("RestoreSnapshot: Listing all available disks...")
+	listDisksScript := `
+		Get-Disk | Select-Object Number, PartitionStyle, OperationalStatus, Size, FriendlyName | Format-Table -AutoSize | Out-String
+	`
+	listOutput, listErr := s.runCommand(ctx, "powershell", "-Command", listDisksScript)
+	if listErr == nil {
+		s.logger.Info().Msgf("Available disks:\n%s", string(listOutput))
+	} else {
+		s.logger.Warn().Msgf("Failed to list disks: %v", listErr)
+	}
+
+	// Get expected volume size in bytes for matching GPT disks
+	expectedSizeBytes := int64(s.config.VolumeSize) * 1024 * 1024 * 1024 // Convert GiB to bytes
+	if newVolume.Size != nil {
+		expectedSizeBytes = int64(*newVolume.Size) * 1024 * 1024 * 1024
+	}
+
+	var diskNumber, partitionNumber string
+	var isNewVolume bool
+
+	// First, try to find and initialize a raw disk (new volume)
+	s.logger.Info().Msgf("RestoreSnapshot: Checking for raw disk (new volume)...")
+	psScript := `
+		$ErrorActionPreference = 'Stop'
+		Stop-Service -Name ShellHWDetection
+		try {
+			Write-Host "Searching for raw disks..."
+			$allDisks = Get-Disk | Select-Object Number, PartitionStyle, OperationalStatus, Size, FriendlyName
+			Write-Host "All disks found:"
+			$allDisks | Format-Table -AutoSize | Out-String | Write-Host
+			
+			$disk = Get-Disk | Where-Object { $_.PartitionStyle -eq 'raw' } | Select-Object -First 1
+			if (-not $disk) {
+				Write-Host "No raw disk found"
+				exit 0
+			}
+			$diskNumber = $disk.Number
+			Write-Host "Found raw disk: $diskNumber (Size: $($disk.Size), Status: $($disk.OperationalStatus))"
+			
+			Write-Host "Initializing disk $diskNumber..."
+			Initialize-Disk -Number $diskNumber -PartitionStyle GPT -Confirm:$false
+			
+			Write-Host "Creating partition on disk $diskNumber..."
+			$partition = New-Partition -DiskNumber $diskNumber -UseMaximumSize -AssignDriveLetter:$false
+			
+			Write-Host "Formatting partition $($partition.PartitionNumber) with NTFS..."
+			Format-Volume -Partition $partition -FileSystem NTFS -Confirm:$false -Force | Out-Null
+			
+			Write-Host "Successfully initialized disk $diskNumber, partition $($partition.PartitionNumber)"
+			Write-Output "$diskNumber,$($partition.PartitionNumber)"
+		} catch {
+			Write-Error "PowerShell error: $($_.Exception.Message)"
+			Write-Error "Error details: $($_.Exception | Format-List -Force | Out-String)"
+			exit 1
+		} finally {
+			Start-Service -Name ShellHWDetection
+		}
+	`
+
+	output, err := s.runCommand(ctx, "powershell", "-Command", psScript)
+	if err == nil && len(output) > 0 {
+		// Successfully initialized raw disk - parse output
+		outputStr := strings.TrimSpace(string(output))
+		lines := strings.Split(outputStr, "\n")
+		var resultLine string
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := strings.TrimSpace(lines[i])
+			if parts := strings.Split(line, ","); len(parts) == 2 {
+				if strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != "" {
+					resultLine = line
+					break
+				}
+			}
+		}
+		if resultLine != "" {
+			parts := strings.Split(resultLine, ",")
+			diskNumber = strings.TrimSpace(parts[0])
+			partitionNumber = strings.TrimSpace(parts[1])
+			isNewVolume = true
+			s.logger.Info().Msgf("RestoreSnapshot: Initialized new raw disk %s, partition %s", diskNumber, partitionNumber)
 		}
 	}
 
-	return fmt.Errorf("filter %s not found in filters: %v", name, utils.PrettyPrint(filters))
+	// If no raw disk found, look for GPT disk matching expected size (existing snapshot)
+	if diskNumber == "" {
+		s.logger.Info().Msgf("RestoreSnapshot: No raw disk found, looking for GPT disk matching size %d bytes...", expectedSizeBytes)
+		psScript = fmt.Sprintf(`
+			$ErrorActionPreference = 'Stop'
+			$expectedSize = %d
+			$tolerance = 104857600
+			Write-Host "Searching for GPT disk matching size $expectedSize (tolerance: $tolerance bytes)..."
+			
+			$allDisks = Get-Disk | Select-Object Number, PartitionStyle, OperationalStatus, Size, FriendlyName
+			Write-Host "All disks found:"
+			$allDisks | Format-Table -AutoSize | Out-String | Write-Host
+			
+			$matchingDisks = Get-Disk | Where-Object { 
+				$_.PartitionStyle -eq 'GPT' -and 
+				$_.Number -ne 0 -and 
+				[Math]::Abs($_.Size - $expectedSize) -lt $tolerance
+			} | Sort-Object Number
+			
+			if (-not $matchingDisks) {
+				Write-Error "No GPT disk found matching expected size $expectedSize"
+				exit 1
+			}
+			
+			$disk = $matchingDisks | Select-Object -First 1
+			$diskNumber = $disk.Number
+			Write-Host "Found matching GPT disk: $diskNumber (Size: $($disk.Size), Expected: $expectedSize)"
+			
+			$partition = Get-Partition -DiskNumber $diskNumber | Where-Object { $_.Type -ne 'Reserved' } | Select-Object -First 1
+			if (-not $partition) {
+				Write-Error "No partition found on disk $diskNumber"
+				exit 1
+			}
+			
+			Write-Host "Found partition $($partition.PartitionNumber) on disk $diskNumber"
+			Write-Output "$diskNumber,$($partition.PartitionNumber)"
+		`, expectedSizeBytes)
+
+		output, err = s.runCommand(ctx, "powershell", "-Command", psScript)
+		if err != nil {
+			outputStr := string(output)
+			if outputStr == "" {
+				outputStr = "(no output)"
+			}
+			return nil, fmt.Errorf("failed to find GPT disk matching expected size. PowerShell output:\n%s\nError: %w", outputStr, err)
+		}
+
+		// Parse disk and partition numbers
+		outputStr := strings.TrimSpace(string(output))
+		lines := strings.Split(outputStr, "\n")
+		var resultLine string
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := strings.TrimSpace(lines[i])
+			if parts := strings.Split(line, ","); len(parts) == 2 {
+				if strings.TrimSpace(parts[0]) != "" && strings.TrimSpace(parts[1]) != "" {
+					resultLine = line
+					break
+				}
+			}
+		}
+
+		if resultLine == "" {
+			return nil, fmt.Errorf("unexpected output from GPT disk search. Could not find disk/partition numbers. Full output:\n%s", outputStr)
+		}
+
+		parts := strings.Split(resultLine, ",")
+		diskNumber = strings.TrimSpace(parts[0])
+		partitionNumber = strings.TrimSpace(parts[1])
+		isNewVolume = false
+		s.logger.Info().Msgf("RestoreSnapshot: Found existing GPT disk %s, partition %s", diskNumber, partitionNumber)
+	}
+
+	// Mount the initialized disk to the requested path
+	if isDriveLetter {
+		s.logger.Info().Msgf("RestoreSnapshot: Assigning drive letter %s...", driveLetter)
+		psScript = fmt.Sprintf(`
+			Set-Partition -DiskNumber %s -PartitionNumber %s -NewDriveLetter '%s' -ErrorAction Stop
+			Write-Output "Drive letter assigned"
+		`, diskNumber, partitionNumber, driveLetter)
+		if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+			return nil, fmt.Errorf("failed to assign drive letter %s: %w", driveLetter, err)
+		}
+	} else {
+		s.logger.Info().Msgf("RestoreSnapshot: Mounting to path %s...", targetPath)
+		pathQuoted := strconv.Quote(targetPath)
+		psScript = fmt.Sprintf(`
+			New-Item -ItemType Directory -Path %s -Force | Out-Null
+			Add-PartitionAccessPath -DiskNumber %s -PartitionNumber %s -AccessPath %s -ErrorAction Stop
+			Write-Output "Access path added"
+		`, pathQuoted, diskNumber, partitionNumber, pathQuoted)
+		if _, err := s.runCommand(ctx, "powershell", "-Command", psScript); err != nil {
+			return nil, fmt.Errorf("failed to mount at %s: %w", targetPath, err)
+		}
+	}
+
+	volumeInfo := &VolumeInfo{
+		VolumeID:   *newVolume.VolumeId,
+		DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber),
+		MountPoint: targetPath,
+		NewVolume:  isNewVolume,
+	}
+	if err := s.saveVolumeInfo(volumeInfo); err != nil {
+		return nil, fmt.Errorf("failed to save volume info: %w", err)
+	}
+
+	s.logger.Info().Msgf("RestoreSnapshot: Successfully mounted volume to %s", targetPath)
+	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: fmt.Sprintf("\\\\.\\PhysicalDrive%s", diskNumber), NewVolume: isNewVolume}, nil
+}
+
+type keyCandidate struct {
+	value  string
+	prefix bool
+}
+
+func (s *AWSSnapshotter) findSnapshotByKeyCandidates(ctx context.Context, baseFilters []types.Filter) (*types.Snapshot, error) {
+	candidates := make([]keyCandidate, 0, 1+len(s.config.RestoreKeys))
+	seen := make(map[string]struct{})
+
+	if s.config.SnapshotKey != "" {
+		candidates = append(candidates, keyCandidate{value: s.config.SnapshotKey})
+		seen[s.config.SnapshotKey] = struct{}{}
+	}
+
+	for _, restoreKey := range s.config.RestoreKeys {
+		restoreKey = strings.TrimSpace(restoreKey)
+		if restoreKey == "" {
+			continue
+		}
+		if _, ok := seen[restoreKey]; ok {
+			continue
+		}
+		candidates = append(candidates, keyCandidate{value: restoreKey, prefix: true})
+		seen[restoreKey] = struct{}{}
+	}
+
+	for _, candidate := range candidates {
+		snapshot, err := s.searchSnapshotByKey(ctx, baseFilters, candidate.value, candidate.prefix)
+		if err != nil {
+			return nil, err
+		}
+		if snapshot != nil {
+			if candidate.prefix {
+				s.logger.Info().Msgf("RestoreSnapshot: Found snapshot %s using restore key prefix %s", *snapshot.SnapshotId, candidate.value)
+			} else {
+				s.logger.Info().Msgf("RestoreSnapshot: Found snapshot %s using exact key %s", *snapshot.SnapshotId, candidate.value)
+			}
+			return snapshot, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *AWSSnapshotter) searchSnapshotByKey(ctx context.Context, baseFilters []types.Filter, key string, prefix bool) (*types.Snapshot, error) {
+	if key == "" {
+		return nil, nil
+	}
+	filters := append([]types.Filter{}, baseFilters...)
+	if !prefix {
+		filters = append(filters, types.Filter{
+			Name:   aws.String(fmt.Sprintf("tag:%s", snapshotTagKeyKey)),
+			Values: []string{key},
+		})
+	}
+
+	snapshots, err := s.describeSnapshotsWithFilters(ctx, filters)
+	if err != nil {
+		return nil, err
+	}
+
+	var latest *types.Snapshot
+	for i := range snapshots {
+		snap := &snapshots[i]
+		tagValue := getTagValueByKey(snap.Tags, snapshotTagKeyKey)
+		if tagValue == "" {
+			continue
+		}
+		if prefix {
+			if !strings.HasPrefix(tagValue, key) {
+				continue
+			}
+		} else if tagValue != key {
+			continue
+		}
+		if latest == nil || (snap.StartTime != nil && (latest.StartTime == nil || snap.StartTime.After(*latest.StartTime))) {
+			latest = snap
+		}
+	}
+
+	return latest, nil
+}
+
+func (s *AWSSnapshotter) findSnapshotByBranch(ctx context.Context, baseFilters []types.Filter, branch string) (*types.Snapshot, error) {
+	if branch == "" {
+		return nil, nil
+	}
+
+	filters := append([]types.Filter{}, baseFilters...)
+	filters = append(filters, types.Filter{
+		Name:   aws.String(fmt.Sprintf("tag:%s", snapshotTagKeyBranch)),
+		Values: []string{branch},
+	})
+
+	snapshots, err := s.describeSnapshotsWithFilters(ctx, filters)
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe snapshots for branch %s: %w", branch, err)
+	}
+
+	return latestSnapshotFromList(snapshots), nil
+}
+
+func (s *AWSSnapshotter) describeSnapshotsWithFilters(ctx context.Context, filters []types.Filter) ([]types.Snapshot, error) {
+	var allSnapshots []types.Snapshot
+	input := &ec2.DescribeSnapshotsInput{
+		Filters:  filters,
+		OwnerIds: []string{"self"},
+	}
+
+	for {
+		output, err := s.ec2Client.DescribeSnapshots(ctx, input)
+		if err != nil {
+			return nil, err
+		}
+		allSnapshots = append(allSnapshots, output.Snapshots...)
+		if output.NextToken == nil {
+			break
+		}
+		input.NextToken = output.NextToken
+	}
+
+	return allSnapshots, nil
+}
+
+func latestSnapshotFromList(snapshots []types.Snapshot) *types.Snapshot {
+	var latest *types.Snapshot
+	for i := range snapshots {
+		snap := &snapshots[i]
+		if snap.StartTime == nil {
+			continue
+		}
+		if latest == nil || latest.StartTime == nil || snap.StartTime.After(*latest.StartTime) {
+			latest = snap
+		}
+	}
+	return latest
+}
+
+func getTagValueByKey(tags []types.Tag, key string) string {
+	for _, tag := range tags {
+		if tag.Key != nil && *tag.Key == key && tag.Value != nil {
+			return *tag.Value
+		}
+	}
+	return ""
 }

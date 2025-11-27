@@ -12,17 +12,32 @@ on:
 permissions:
   contents: read
 
+env:
+  CACHE_BUST: v2
+
 jobs:
-  build-with-snapshot:
-    name: Build with Snapshot
-    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.2xlarge
+  test-linux-with-save-docker:
+    name: Test Linux with save (docker)
+    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.xlarge
     steps:
-      - uses: actions/checkout@v4
-      - uses: ./
+      - uses: actions/checkout@v5
+      - name: snapshot
+        id: snapshot
+        uses: ./
         with:
+          version: ${{ env.CACHE_BUST }}-${{ github.job }}
           path: /var/lib/docker
           volume_size: 60
+      - name: Check test file exists if cache hit
+        if: steps.snapshot.outputs.cache-hit == 'true'
+        run: |
+          test -f /var/lib/docker/test-file.txt || (echo "Error: test-file.txt should exist when cache-hit is true" && exit 1)
+          echo "✓ test-file.txt exists as expected"
       - run: df -ah && sudo ls -al /var/lib/docker
+      - name: Create test file
+        run: |
+          echo "Test file created at $(date)" | sudo tee /var/lib/docker/test-file.txt
+          sudo ls -lh /var/lib/docker/test-file.txt
       - uses: docker/setup-buildx-action@v3
         with:
           name: runs-on
@@ -32,21 +47,133 @@ jobs:
           repository: runs-on-demo/benchmark-posthog
           submodules: recursive
           path: repo
+      - name: Determine upstream commit SHA
+        id: upstream
+        run: echo "sha=$(cd repo/upstream && git rev-parse HEAD)" >> $GITHUB_OUTPUT
       - uses: docker/build-push-action@v4
         with:
-          context: ./repo/upstream
+          context: https://github.com/PostHog/posthog.git#${{ steps.upstream.outputs.sha }}
+          build-args: |
+            BUILDKIT_CONTEXT_KEEP_GIT_DIR=1
 
-  restore-only:
-    name: "save: false"
-    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.2xlarge
+  test-linux-with-save-simple:
+    name: Test Linux with save (simple)
+    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.large
     steps:
-      - uses: actions/checkout@v4
-      - uses: ./
+      - uses: actions/checkout@v5
+      - name: snapshot
+        id: snapshot
+        uses: ./
         with:
+          version: ${{ env.CACHE_BUST }}-${{ github.job }}
+          path: /path/to/volume
+          volume_throughput: 125
+          volume_size: 5
+      - name: Check test file exists if cache hit
+        if: steps.snapshot.outputs.cache-hit == 'true'
+        run: |
+          test -f /path/to/volume/test-file.txt || (echo "Error: test-file.txt should exist when cache-hit is true" && exit 1)
+          echo "✓ test-file.txt exists as expected"
+      - name: Create test file
+        run: |
+          echo "Test file created at $(date)" | sudo tee /path/to/volume/test-file.txt
+          sudo ls -lh /path/to/volume/test-file.txt
+
+  test-linux-no-save:
+    name: Test Linux without save
+    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.large
+    steps:
+      - uses: actions/checkout@v5
+      - name: snapshot
+        id: snapshot
+        uses: ./
+        with:
+          version: ${{ env.CACHE_BUST }}-${{ github.job }}-v2
           path: /path/to/volume
           volume_size: 10
           save: false
       - run: |
-          sudo chown -R runner:runner /path/to/volume
           dd if=/dev/zero of=/path/to/volume/test-file-1gb bs=1M count=1024
           ls -lh /path/to/volume/
+
+  test-windows-with-save:
+    name: Test Windows with save
+    runs-on: runs-on=${{ github.run_id }}/image=windows25-full-x64/family=m7a.large
+    steps:
+      - uses: actions/checkout@v5
+      - name: snapshot
+        id: snapshot
+        uses: ./
+        with:
+          version: ${{ env.CACHE_BUST }}-${{ github.job }}
+          path: C:\test-volume
+          volume_size: 10
+          save: true
+      - name: Check test file exists if cache hit
+        if: steps.snapshot.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          $testFile = "C:\test-volume\test-file.txt"
+          if (Test-Path $testFile) {
+            Write-Host "✓ test-file.txt exists as expected"
+            Get-Item $testFile | Format-List FullName, Length, LastWriteTime
+            Write-Host "File contents:"
+            Get-Content $testFile
+          } else {
+            Write-Error "Error: test-file.txt should exist when cache-hit is true"
+            exit 1
+          }
+      - name: Display all disks and mountpoints
+        shell: pwsh
+        run: |
+          Write-Host "=== All Disks ==="
+          Get-Disk | Format-Table Number, PartitionStyle, OperationalStatus, Size, FriendlyName -AutoSize
+          Write-Host "`n=== All Partitions ==="
+          Get-Partition | Format-Table DiskNumber, PartitionNumber, DriveLetter, AccessPaths, Size -AutoSize
+          Write-Host "`n=== All Volumes ==="
+          Get-Volume | Format-Table DriveLetter, FileSystemLabel, FileSystem, Size, SizeRemaining -AutoSize
+          Write-Host "`n=== Mount Points ==="
+          Get-Partition | Where-Object { $_.AccessPaths } | ForEach-Object {
+            Write-Host "Disk $($_.DiskNumber), Partition $($_.PartitionNumber):"
+            $_.AccessPaths | ForEach-Object { Write-Host "  $_" }
+          }
+      - name: Test write to mounted volume
+        shell: pwsh
+        run: |
+          $testFile = "C:\test-volume\test-file.txt"
+          $testContent = "Test file written at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+          Write-Host "Writing test file to $testFile"
+          Set-Content -Path $testFile -Value $testContent
+          Write-Host "File written successfully"
+          Write-Host "`n=== Verifying file ==="
+          Get-Item $testFile | Format-List FullName, Length, LastWriteTime
+          Write-Host "File contents:"
+          Get-Content $testFile
+          Write-Host "`n=== Directory listing ==="
+          Get-ChildItem C:\test-volume | Format-Table Name, Length, LastWriteTime -AutoSize
+
+  test-windows-no-save:
+    name: Test Windows without save
+    runs-on: runs-on=${{ github.run_id }}/image=windows25-full-x64/family=m7a.large
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./
+        with:
+          version: ${{ env.CACHE_BUST }}-${{ github.job }}
+          path: C:\test-volume
+          volume_size: 10
+          save: false
+      - name: Display all disks and mountpoints
+        shell: pwsh
+        run: |
+          Write-Host "=== All Disks ==="
+          Get-Disk | Format-Table Number, PartitionStyle, OperationalStatus, Size, FriendlyName -AutoSize
+          Write-Host "`n=== All Partitions ==="
+          Get-Partition | Format-Table DiskNumber, PartitionNumber, DriveLetter, AccessPaths, Size -AutoSize
+          Write-Host "`n=== All Volumes ==="
+          Get-Volume | Format-Table DriveLetter, FileSystemLabel, FileSystem, Size, SizeRemaining -AutoSize
+          Write-Host "`n=== Mount Points ==="
+          Get-Partition | Where-Object { $_.AccessPaths } | ForEach-Object {
+            Write-Host "Disk $($_.DiskNumber), Partition $($_.PartitionNumber):"
+            $_.AccessPaths | ForEach-Object { Write-Host "  $_" }
+          }

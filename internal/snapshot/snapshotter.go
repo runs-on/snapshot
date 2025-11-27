@@ -2,6 +2,8 @@ package snapshot
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -26,6 +28,7 @@ const (
 	snapshotTagKeyBranch     = "runs-on-snapshot-branch"
 	snapshotTagKeyRepository = "runs-on-snapshot-repository"
 	snapshotTagKeyVersion    = "runs-on-snapshot-version"
+	snapshotTagKeyKey        = "runs-on-snapshot-key"
 	nameTagKey               = "Name"
 	timestampTagKey          = "runs-on-timestamp"
 	ttlTagKey                = "runs-on-delete-after"
@@ -161,10 +164,38 @@ func (s *AWSSnapshotter) defaultTags() []types.Tag {
 		{Key: aws.String(snapshotTagKeyArch), Value: aws.String(s.arch())},
 		{Key: aws.String(snapshotTagKeyPlatform), Value: aws.String(s.platform())},
 	}
+	if s.config.SnapshotKey != "" {
+		tags = append(tags, types.Tag{Key: aws.String(snapshotTagKeyKey), Value: aws.String(s.config.SnapshotKey)})
+	}
 	for _, tag := range s.config.CustomTags {
 		tags = append(tags, types.Tag{Key: aws.String(tag.Key), Value: aws.String(tag.Value)})
 	}
 	return tags
+}
+
+func (s *AWSSnapshotter) baseSnapshotFilters() []types.Filter {
+	filters := []types.Filter{
+		{Name: aws.String("status"), Values: []string{string(types.SnapshotStateCompleted)}},
+	}
+	tagFilters := []struct {
+		key   string
+		value string
+	}{
+		{snapshotTagKeyVersion, s.config.Version},
+		{snapshotTagKeyRepository, s.config.GithubRepository},
+		{snapshotTagKeyArch, s.arch()},
+		{snapshotTagKeyPlatform, s.platform()},
+	}
+	for _, tag := range tagFilters {
+		if tag.value == "" {
+			continue
+		}
+		filters = append(filters, types.Filter{
+			Name:   aws.String(fmt.Sprintf("tag:%s", tag.key)),
+			Values: []string{tag.value},
+		})
+	}
+	return filters
 }
 
 // saveVolumeInfo writes volume information to a JSON file
@@ -193,7 +224,10 @@ func (s *AWSSnapshotter) loadVolumeInfo(mountPoint string) (*VolumeInfo, error) 
 	infoPath := getVolumeInfoPath(mountPoint)
 	data, err := os.ReadFile(infoPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read volume info file: %w", err)
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("volume info file not found at %s: volume may not have been restored properly. Ensure RestoreSnapshot completed successfully before calling CreateSnapshot: %w", infoPath, err)
+		}
+		return nil, fmt.Errorf("failed to read volume info file at %s: %w", infoPath, err)
 	}
 
 	var volumeInfo VolumeInfo
@@ -233,7 +267,14 @@ func (s *AWSSnapshotter) runCommand(ctx context.Context, name string, arg ...str
 
 // getVolumeInfoPath returns the path to the volume info JSON file for a given mount point
 func getVolumeInfoPath(mountPoint string) string {
-	// Replace slashes with hyphens and remove leading/trailing hyphens
-	sanitizedPath := strings.Trim(strings.ReplaceAll(mountPoint, "/", "-"), "-")
-	return filepath.Join("/runs-on", fmt.Sprintf("snapshot-%s.json", sanitizedPath))
+	// Hash the mount point using SHA256 to avoid collisions and handle special characters
+	hash := sha256.Sum256([]byte(mountPoint))
+	hashHex := hex.EncodeToString(hash[:])
+	
+	// Use platform-appropriate base path
+	basePath := "/runs-on"
+	if runtime.GOOS == "windows" {
+		basePath = "C:\\runs-on"
+	}
+	return filepath.Join(basePath, fmt.Sprintf("snapshot-%s.json", hashHex))
 }
