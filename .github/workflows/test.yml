@@ -16,11 +16,11 @@ env:
   CACHE_BUST: v2
 
 jobs:
-  test-linux-with-save:
-    name: Test Linux with save
-    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.2xlarge
+  test-linux-with-save-docker:
+    name: Test Linux with save (docker)
+    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.xlarge
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: snapshot
         id: snapshot
         uses: ./
@@ -56,12 +56,37 @@ jobs:
           build-args: |
             BUILDKIT_CONTEXT_KEEP_GIT_DIR=1
 
+  test-linux-with-save-simple:
+    name: Test Linux with save (simple)
+    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.large
+    steps:
+      - uses: actions/checkout@v5
+      - name: snapshot
+        id: snapshot
+        uses: ./
+        with:
+          version: ${{ env.CACHE_BUST }}-${{ github.job }}
+          path: /path/to/volume
+          volume_throughput: 125
+          volume_size: 5
+      - name: Check test file exists if cache hit
+        if: steps.snapshot.outputs.cache-hit == 'true'
+        run: |
+          test -f /path/to/volume/test-file.txt || (echo "Error: test-file.txt should exist when cache-hit is true" && exit 1)
+          echo "✓ test-file.txt exists as expected"
+      - name: Create test file
+        run: |
+          echo "Test file created at $(date)" | sudo tee /path/to/volume/test-file.txt
+          sudo ls -lh /path/to/volume/test-file.txt
+
   test-linux-no-save:
     name: Test Linux without save
-    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.2xlarge
+    runs-on: runs-on=${{ github.run_id }}/image=ubuntu24-full-x64/family=c7a.large
     steps:
-      - uses: actions/checkout@v4
-      - uses: ./
+      - uses: actions/checkout@v5
+      - name: snapshot
+        id: snapshot
+        uses: ./
         with:
           version: ${{ env.CACHE_BUST }}-${{ github.job }}-v2
           path: /path/to/volume
@@ -75,7 +100,7 @@ jobs:
     name: Test Windows with save
     runs-on: runs-on=${{ github.run_id }}/image=windows25-full-x64/family=m7a.large
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: snapshot
         id: snapshot
         uses: ./
@@ -131,7 +156,7 @@ jobs:
     name: Test Windows without save
     runs-on: runs-on=${{ github.run_id }}/image=windows25-full-x64/family=m7a.large
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: ./
         with:
           version: ${{ env.CACHE_BUST }}-${{ github.job }}
