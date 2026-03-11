@@ -1,7 +1,7 @@
 name: 'runs-on/snapshot'
 description: 'GitHub Action for snapshotting directories on self-hosted runners'
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'index.js'
   post: 'post.js'
   # required, otherwise it could snapshot directories even if previous steps failed or were interrupted, which could lead to corrupted snapshots
