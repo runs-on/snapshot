@@ -12,7 +12,7 @@ jobs:
   long-docker-build:
     runs-on: runs-on=${{ github.run_id }}/runner=2cpu-linux-x64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       # snapshot action
       - uses: runs-on/snapshot@v1
         with:
