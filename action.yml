@@ -8,6 +8,33 @@ runs:
   post-if: "success()"
 
 inputs:
+  key:
+    description: 'Optional snapshot stream key. Scopes identity by key, normalized mount path, and version; omit to retain the legacy version-only identity.'
+    required: false
+  restore-keys:
+    description: 'Newline-separated exact fallback keys. Requires key; tried on the current branch before the default branch.'
+    required: false
+  default-branch-fallback:
+    description: 'Try the default branch after all current-branch keys miss.'
+    default: 'true'
+    required: false
+  save-if:
+    description: 'Policy for save: auto. Either always or git-paths-changed.'
+    default: 'always'
+    required: false
+  force-save:
+    description: 'Bypass smart-save skipping; save: false still takes precedence.'
+    default: 'false'
+    required: false
+  git-repository:
+    description: 'Repository to compare for smart save; defaults to <path>/workspace.'
+    required: false
+  git-head:
+    description: 'Expected source commit; defaults to GITHUB_SHA and must match the checked-out HEAD to record source metadata.'
+    required: false
+  git-paths:
+    description: 'Newline-separated Git pathspecs required for save-if: git-paths-changed.'
+    required: false
   path:
     description: 'Path to the directory to snapshot. Must be an absolute path.'
     required: true
@@ -40,6 +67,18 @@ inputs:
     required: false
     default: 'false'
   save:
-    description: 'Save the volume in the post step. When false, the volume is not saved.'
+    description: 'Save mode: true, false, or auto. Auto evaluates save-if after the workload. Skipped saves still unmount, detach, and delete the job volume.'
     required: false
     default: 'true'
+
+outputs:
+  restored:
+    description: 'true when a compatible snapshot was restored; false for a blank volume.'
+  restored-from:
+    description: 'branch, restore-key, default-branch, default-branch-restore-key, or empty.'
+  restored-branch:
+    description: 'Branch that supplied the restored snapshot.'
+  restored-snapshot-id:
+    description: 'Snapshot ID used for restore; empty for a blank volume.'
+  volume-id:
+    description: 'EBS volume mounted for this job.'

@@ -17,8 +17,16 @@ const requiredTagKey = "runs-on-stack-name"
 type Config struct {
 	Path                     string
 	Version                  string
+	Key                      string
+	RestoreKeys              []string
+	DefaultBranchFallback    bool
 	WaitForCompletion        bool
-	Save                     bool
+	SaveMode                 string
+	SaveIf                   string
+	ForceSave                bool
+	GitRepository            string
+	GitHead                  string
+	GitPaths                 []string
 	VolumeType               types.VolumeType
 	VolumeIops               int32
 	VolumeThroughput         int32
@@ -59,7 +67,7 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 	} else {
 		var runnerConfig RunnerConfig
 		if err := json.Unmarshal(configBytes, &runnerConfig); err != nil {
-			action.Warningf("Error parsing RunsOn config file: %v", err)
+			action.Fatalf("Error parsing RunsOn config file: %v", err)
 		} else {
 			cfg.RunnerConfig = &runnerConfig
 			action.Infof("Runner config: %s", utils.PrettyPrint(cfg.RunnerConfig))
@@ -89,15 +97,47 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 	if !strings.HasPrefix(path, "/") {
 		action.Fatalf("Path '%s' must be an absolute path.", path)
 	}
-	cfg.Path = path
+	cfg.Path = filepath.Clean(path)
 
 	cfg.Version = action.GetInput("version")
 	if cfg.Version == "" {
 		cfg.Version = "v1"
 	}
+	cfg.Key = strings.TrimSpace(action.GetInput("key"))
+	cfg.RestoreKeys = nonEmptyLines(action.GetInput("restore-keys"))
+	if cfg.Key == "" && len(cfg.RestoreKeys) > 0 {
+		action.Fatalf("restore-keys requires a primary key.")
+	}
+	cfg.DefaultBranchFallback = action.GetInput("default-branch-fallback") != "false"
 
 	cfg.WaitForCompletion = action.GetInput("wait_for_completion") != "false"
-	cfg.Save = action.GetInput("save") != "false"
+	cfg.SaveMode = action.GetInput("save")
+	if cfg.SaveMode == "" {
+		cfg.SaveMode = "true"
+	}
+	if cfg.SaveMode != "true" && cfg.SaveMode != "false" && cfg.SaveMode != "auto" {
+		action.Fatalf("save must be true, false, or auto.")
+	}
+	cfg.SaveIf = action.GetInput("save-if")
+	if cfg.SaveIf == "" {
+		cfg.SaveIf = "always"
+	}
+	if cfg.SaveIf != "always" && cfg.SaveIf != "git-paths-changed" {
+		action.Fatalf("save-if must be always or git-paths-changed.")
+	}
+	cfg.ForceSave = action.GetInput("force-save") == "true"
+	cfg.GitRepository = action.GetInput("git-repository")
+	if cfg.GitRepository == "" {
+		cfg.GitRepository = filepath.Join(cfg.Path, "workspace")
+	}
+	cfg.GitHead = action.GetInput("git-head")
+	if cfg.GitHead == "" {
+		cfg.GitHead = os.Getenv("GITHUB_SHA")
+	}
+	cfg.GitPaths = nonEmptyLines(action.GetInput("git-paths"))
+	if cfg.SaveMode == "auto" && cfg.SaveIf == "git-paths-changed" && len(cfg.GitPaths) == 0 {
+		action.Fatalf("git-paths is required for save-if: git-paths-changed.")
+	}
 
 	volumeType := action.GetInput("volume_type")
 	if volumeType == "" {
@@ -115,6 +155,16 @@ func NewConfigFromInputs(action *githubactions.Action) *Config {
 	action.Infof("Input 'wait_for_completion': %t", cfg.WaitForCompletion)
 
 	return cfg
+}
+
+func nonEmptyLines(input string) []string {
+	var lines []string
+	for _, line := range strings.Split(input, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
 
 func parseInt(action *githubactions.Action, input string, min int, max int) int32 {

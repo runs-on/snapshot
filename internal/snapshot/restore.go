@@ -23,59 +23,10 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 
 	var newVolume *types.Volume
 	var volumeIsNewAndUnformatted bool
-	// 1. Find latest snapshot for branch
-	filters := []types.Filter{
-		{Name: aws.String("status"), Values: []string{string(types.SnapshotStateCompleted)}},
-	}
-	for _, tag := range s.defaultTags() {
-		filters = append(filters, types.Filter{Name: aws.String(fmt.Sprintf("tag:%s", *tag.Key)), Values: []string{*tag.Value}})
-	}
-	s.logger.Info().Msgf("RestoreSnapshot: Searching for the latest snapshot for branch: %s and filters: %s", gitBranch, utils.PrettyPrint(filters))
-	snapshotsOutput, err := s.ec2Client.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{
-		Filters:  filters,
-		OwnerIds: []string{"self"}, // Or specific account ID if needed
-	})
+	// Search explicit candidates in order; exhaust pagination within each one.
+	latestSnapshot, candidate, err := s.lookupSnapshot(ctx, s.ec2Client)
 	if err != nil {
-		return nil, fmt.Errorf("failed to describe snapshots for branch %s: %w", gitBranch, err)
-	}
-
-	var latestSnapshot *types.Snapshot
-	if len(snapshotsOutput.Snapshots) > 0 {
-		// Find most recent snapshot by comparing timestamps
-		latestSnapshot = &snapshotsOutput.Snapshots[0]
-		for _, snap := range snapshotsOutput.Snapshots {
-			if snapTime := snap.StartTime; snapTime.After(*latestSnapshot.StartTime) {
-				latestSnapshot = &snap
-			}
-		}
-		s.logger.Info().Msgf("RestoreSnapshot: Found latest snapshot %s for branch %s", *latestSnapshot.SnapshotId, gitBranch)
-	} else if s.config.RunnerConfig.DefaultBranch != "" {
-		// Try finding snapshot from default branch
-		if err := replaceFilterValues(filters, "tag:"+snapshotTagKeyBranch, []string{s.getSnapshotTagValueDefaultBranch()}); err != nil {
-			return nil, fmt.Errorf("failed to find default branch filter: %w", err)
-		}
-
-		s.logger.Info().Msgf("RestoreSnapshot: No snapshot found for branch %s, trying default branch %s with filters: %s", gitBranch, s.config.RunnerConfig.DefaultBranch, utils.PrettyPrint(filters))
-
-		defaultBranchSnapshotsOutput, err := s.ec2Client.DescribeSnapshots(ctx, &ec2.DescribeSnapshotsInput{
-			Filters:  filters,
-			OwnerIds: []string{"self"},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to describe snapshots for default branch %s: %w", s.config.RunnerConfig.DefaultBranch, err)
-		}
-
-		if len(defaultBranchSnapshotsOutput.Snapshots) > 0 {
-			latestSnapshot = &defaultBranchSnapshotsOutput.Snapshots[0]
-			for _, snap := range defaultBranchSnapshotsOutput.Snapshots {
-				if snapTime := snap.StartTime; snapTime.After(*latestSnapshot.StartTime) {
-					latestSnapshot = &snap
-				}
-			}
-			s.logger.Info().Msgf("RestoreSnapshot: Found latest snapshot %s from default branch %s", *latestSnapshot.SnapshotId, s.config.RunnerConfig.DefaultBranch)
-		} else {
-			s.logger.Info().Msgf("RestoreSnapshot: No existing snapshot found for branch %s or default branch %s. A new volume will be created.", gitBranch, s.config.RunnerConfig.DefaultBranch)
-		}
+		return nil, err
 	}
 
 	commonVolumeTags := append(s.defaultTags(), []types.Tag{
@@ -280,7 +231,11 @@ func (s *AWSSnapshotter) RestoreSnapshot(ctx context.Context, mountPoint string)
 		s.logger.Info().Msgf("RestoreSnapshot: Docker disk usage displayed.")
 	}
 
-	return &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: actualDeviceName, NewVolume: volumeIsNewAndUnformatted}, nil
+	output := &RestoreSnapshotOutput{VolumeID: *newVolume.VolumeId, DeviceName: actualDeviceName, NewVolume: volumeIsNewAndUnformatted, Source: candidate.source, Branch: candidate.branch}
+	if latestSnapshot != nil {
+		output.SnapshotID = aws.ToString(latestSnapshot.SnapshotId)
+	}
+	return output, nil
 }
 
 func replaceFilterValues(filters []types.Filter, name string, values []string) error {

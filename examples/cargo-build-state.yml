@@ -1,0 +1,78 @@
+name: Cargo build-state example
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: runs-on=${{ github.run_id }}/runner=4cpu-linux-x64
+    strategy:
+      matrix:
+        profile: [dev, release]
+    concurrency:
+      group: cargo-snapshot-${{ github.ref }}-${{ matrix.profile }}
+      cancel-in-progress: false
+    env:
+      SNAPSHOT_ROOT: /mnt/build-state
+      CARGO_HOME: /mnt/build-state/cargo-home
+      RUSTUP_HOME: /mnt/build-state/rustup-home
+      CARGO_TARGET_DIR: /mnt/build-state/workspace/target
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: current-source
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: runs-on/snapshot@v1
+        id: snapshot
+        with:
+          path: /mnt/build-state
+          key: cargo-${{ matrix.profile }}
+          version: rust-build-v1
+          volume_size: 20
+          save: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && 'auto' || 'false' }}
+          save-if: git-paths-changed
+          git-head: ${{ github.sha }}
+          git-paths: |
+            Cargo.toml
+            Cargo.lock
+            rust-toolchain.toml
+            .cargo/**
+            src/**
+            crates/**
+
+      - name: Update restored source without storing checkout credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown "$(id -u):$(id -g)" "$SNAPSHOT_ROOT"
+          worktree="$SNAPSHOT_ROOT/workspace"
+          mkdir -p "$worktree" "$CARGO_HOME" "$RUSTUP_HOME"
+          if [ ! -d "$worktree/.git" ]; then
+            git -C "$worktree" init
+          fi
+          git -C "$worktree" fetch --no-tags "$GITHUB_WORKSPACE/current-source" "$GITHUB_SHA"
+          if [ "$(git -C "$worktree" rev-parse --verify HEAD 2>/dev/null || true)" != "$GITHUB_SHA" ] ||
+            ! git -C "$worktree" diff --quiet HEAD; then
+            git -C "$worktree" -c core.hooksPath=/dev/null checkout --detach --force "$GITHUB_SHA"
+          fi
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        working-directory: /mnt/build-state/workspace
+        env:
+          BUILD_PROFILE: ${{ matrix.profile }}
+        run: cargo build --locked --profile "$BUILD_PROFILE"
+
+      - name: Scrub Cargo credential files before a save-capable post step
+        if: always()
+        shell: bash
+        run: rm -f -- "$CARGO_HOME/credentials" "$CARGO_HOME/credentials.toml"
