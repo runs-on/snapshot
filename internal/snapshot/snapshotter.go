@@ -2,6 +2,7 @@ package snapshot
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -78,11 +79,15 @@ type RestoreSnapshotOutput struct {
 	VolumeID   string
 	DeviceName string
 	NewVolume  bool
+	SnapshotID string
+	Source     string
+	Branch     string
 }
 
 // CreateSnapshotOutput holds the results of CreateSnapshot.
 type CreateSnapshotOutput struct {
 	SnapshotID string
+	Reason     string
 }
 
 // VolumeInfo stores information about the mounted volume
@@ -156,7 +161,7 @@ func (s *AWSSnapshotter) platform() string {
 
 func (s *AWSSnapshotter) defaultTags() []types.Tag {
 	tags := []types.Tag{
-		{Key: aws.String(snapshotTagKeyVersion), Value: aws.String(s.config.Version)},
+		{Key: aws.String(snapshotTagKeyVersion), Value: aws.String(s.snapshotVersion(s.config.Key))},
 		{Key: aws.String(snapshotTagKeyRepository), Value: aws.String(s.config.GithubRepository)},
 		{Key: aws.String(repoFullNameTagKey), Value: aws.String(s.config.GithubRepository)},
 		{Key: aws.String(snapshotTagKeyBranch), Value: aws.String(s.getSnapshotTagValue())},
@@ -167,6 +172,17 @@ func (s *AWSSnapshotter) defaultTags() []types.Tag {
 		tags = append(tags, types.Tag{Key: aws.String(tag.Key), Value: aws.String(tag.Value)})
 	}
 	return tags
+}
+
+// Encode all keyed identity in the existing version tag so legacy cleanup
+// sees distinct streams without needing to understand additional tag names.
+// Jobs without a key retain their existing snapshot identity.
+func (s *AWSSnapshotter) snapshotVersion(key string) string {
+	if key == "" {
+		return s.config.Version
+	}
+	identity, _ := json.Marshal([]string{s.config.Version, key, filepath.Clean(s.config.Path)})
+	return fmt.Sprintf("keyed-v1-%x", sha256.Sum256(identity))
 }
 
 // saveVolumeInfo writes volume information to a JSON file

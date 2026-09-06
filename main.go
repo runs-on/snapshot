@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"os"
+	"strconv"
 
 	"github.com/rs/zerolog"
 	"github.com/runs-on/snapshot/internal/config"
@@ -19,14 +20,19 @@ func handleMainExecution(action *githubactions.Action, ctx context.Context, logg
 		action.Infof("Restoring volume for %s...", cfg.Path)
 		snapshotter, err := snapshot.NewAWSSnapshotter(ctx, logger, cfg)
 		if err != nil {
-			action.Errorf("Failed to create snapshotter: %v", err)
+			action.Fatalf("Failed to create snapshotter: %v", err)
 		} else {
 			action.Infof("Creating snapshot for %s", cfg.Path)
 			snapshotOutput, err := snapshotter.RestoreSnapshot(ctx, cfg.Path)
 			if err != nil {
-				action.Errorf("Failed to restore snapshot for %s: %v", cfg.Path, err)
+				action.Fatalf("Failed to restore snapshot for %s: %v", cfg.Path, err)
 			} else {
 				action.Infof("Snapshot restored into volume %s", snapshotOutput.VolumeID)
+				action.SetOutput("restored", strconv.FormatBool(!snapshotOutput.NewVolume))
+				action.SetOutput("restored-from", snapshotOutput.Source)
+				action.SetOutput("restored-branch", snapshotOutput.Branch)
+				action.SetOutput("restored-snapshot-id", snapshotOutput.SnapshotID)
+				action.SetOutput("volume-id", snapshotOutput.VolumeID)
 			}
 		}
 	}
@@ -39,21 +45,17 @@ func handlePostExecution(action *githubactions.Action, ctx context.Context, logg
 	action.Infof("Running post-execution phase...")
 	cfg := config.NewConfigFromInputs(action)
 
-	if !cfg.Save {
-		action.Infof("Skipping snapshot creation as 'save' is set to false.")
-		action.Infof("Post-execution phase finished.")
-		return
-	}
-
 	if cfg.Path != "" {
 		action.Infof("Snapshotting volume for %s...", cfg.Path)
 		snapshotter, err := snapshot.NewAWSSnapshotter(ctx, logger, cfg)
 		if err != nil {
-			action.Errorf("Failed to create snapshotter: %v", err)
+			action.Fatalf("Failed to create snapshotter: %v", err)
 		} else {
 			snapshot, err := snapshotter.CreateSnapshot(ctx, cfg.Path)
 			if err != nil {
-				action.Errorf("Failed to snapshot volumes: %v", err)
+				action.Fatalf("Failed to snapshot volumes: %v", err)
+			} else if snapshot.SnapshotID == "" {
+				action.Infof("Snapshot save skipped: %s; volume cleaned up.", snapshot.Reason)
 			} else {
 				action.Infof("Snapshot created: %s. Note that it might take a few minutes to be available for use.", snapshot.SnapshotID)
 			}

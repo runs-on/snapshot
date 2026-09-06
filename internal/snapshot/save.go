@@ -3,6 +3,7 @@ package snapshot
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -24,12 +25,22 @@ func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to load volume info: %w", err)
 	}
+	decision := s.decideSave(ctx, mountPoint)
+	s.logger.Info().Msgf("Snapshot save decision: save=%t reason=%s", decision.save, decision.reason)
+	_, metadataErr := os.Lstat(sourceMetadataPath(mountPoint))
+	if decision.save && (s.config.SaveMode == "auto" || metadataErr == nil) {
+		if err := writeSourceMetadata(mountPoint, decision.metadata); err != nil {
+			return nil, fmt.Errorf("write snapshot source metadata: %w", err)
+		}
+	}
 
 	// 2. Operations on jobVolumeID
 	if strings.HasPrefix(mountPoint, "/var/lib/docker") {
 		s.logger.Info().Msgf("CreateSnapshot: Cleaning up useless files...")
-		if _, err := s.runCommand(ctx, "sudo", "docker", "builder", "prune", "-f"); err != nil {
-			s.logger.Warn().Msgf("Warning: failed to prune docker builder: %v", err)
+		if decision.save {
+			if _, err := s.runCommand(ctx, "sudo", "docker", "builder", "prune", "-f"); err != nil {
+				s.logger.Warn().Msgf("Warning: failed to prune docker builder: %v", err)
+			}
 		}
 
 		s.logger.Info().Msgf("CreateSnapshot: Stopping docker service...")
@@ -75,6 +86,12 @@ func (s *AWSSnapshotter) CreateSnapshot(ctx context.Context, mountPoint string) 
 		return nil, fmt.Errorf("volume %s did not become available (detach) in time: %w", volumeInfo.VolumeID, err)
 	}
 	s.logger.Info().Msgf("CreateSnapshot: Volume %s is detached.", volumeInfo.VolumeID)
+	if !decision.save {
+		if _, err := s.ec2Client.DeleteVolume(ctx, &ec2.DeleteVolumeInput{VolumeId: aws.String(volumeInfo.VolumeID)}); err != nil {
+			return nil, fmt.Errorf("delete skipped snapshot volume %s: %w", volumeInfo.VolumeID, err)
+		}
+		return &CreateSnapshotOutput{Reason: decision.reason}, nil
+	}
 
 	// 3. Create new snapshot
 	currentTime := time.Now()

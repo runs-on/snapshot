@@ -4,6 +4,12 @@ GitHub Action to snapshot and restore entire folders on self-hosted runners.
 
 To be used with [RunsOn](https://runs-on.com). Requires version v2.8.3+.
 
+## Build-state and tool setup
+
+For keyed matrix snapshots, restore outputs, source-aware save policies, and snapshot-local Rust tool setup, see [the build-state guide](docs/build-state.md) and [the workflow example](examples/cargo-build-state.yml).
+
+For new RunsOn v3.2+ deployments, evaluate [managed sticky disks](https://runs-on.com/docs/runners/capabilities/sticky-disks/) first. This action owns a legacy EC2/EBS lifecycle. Enabling `EnableStickyDiskIsolation` / `enable_stickydisk_isolation` removes its runner-side EBS permissions; migrate before enabling that option. Managed sticky disks and this action have different lifecycle controls and should not own the same paths.
+
 ## Usage
 
 ```yaml
