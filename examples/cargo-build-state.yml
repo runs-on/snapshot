@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: runs-on=${{ github.run_id }}/runner=4cpu-linux-x64
     strategy:
       matrix:
